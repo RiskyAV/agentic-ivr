@@ -7,7 +7,8 @@ export type SystemName = 'crm' | 'lms' | 'payments' | 'policy' | 'ops';
 
 export type ClientMsg =
   | { type: 'user_text'; turnId: string; text: string }
-  | { type: 'voice_start' }
+  /** `mode: 'ptt'` uses manual STT commits (push-to-talk); default is open mic with VAD commits. */
+  | { type: 'voice_start'; mode?: 'open' | 'ptt' }
   | { type: 'voice_stop' }
   | { type: 'ptt'; down: boolean }
   | { type: 'confirm_action'; proposalId: string; termsHash: string }

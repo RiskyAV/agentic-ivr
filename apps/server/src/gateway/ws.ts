@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Server as HttpServer } from 'node:http';
 import { today } from '@app/domain';
-import type { ChatItemView, ClientMsg, ServerMsg } from '@app/shared';
+import { decodeAudioFrame, type ChatItemView, type ClientMsg, type ServerMsg } from '@app/shared';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { ActionOutcome } from '../platform/actions/types.js';
 import type { Session } from '../platform/context/session.js';
@@ -9,6 +9,8 @@ import { loadSnapshot, toSnapshotView } from '../platform/context/snapshot.js';
 import type { TurnSink } from '../platform/engine/engine.js';
 import { TurnTracer } from '../platform/telemetry/tracer.js';
 import type { ToolContext } from '../platform/tools/types.js';
+import { TtsPool } from '../platform/voice/tts.js';
+import { VoiceSession } from '../platform/voice/turnManager.js';
 import { verifyToken, type TokenPayload } from './auth.js';
 import type { GatewayCtx } from './context.js';
 
@@ -19,6 +21,8 @@ export const SWEEP_EVERY_MS = 60_000;
 export const REPLACED_CODE = 4001;
 const MAX_TEXT_CHARS = 4000;
 const PING_EVERY_MS = 25_000;
+/** Outbound audio is dropped (not queued) once this much is buffered for a slow client (D-024). */
+const MAX_BUFFERED_AUDIO_BYTES = 2 * 1024 * 1024;
 
 interface Conn {
   ws: WebSocket;
@@ -26,6 +30,8 @@ interface Conn {
   alive: boolean;
   /** Set before the socket is closed because a newer connection took over the session. */
   replaced: boolean;
+  /** Present while the client is in voice mode. */
+  voice?: VoiceSession;
 }
 
 export interface WsGateway {
@@ -33,11 +39,20 @@ export interface WsGateway {
   liveCount(): number;
   /** Marks every session with an open socket as seen, so the idle sweep never deletes a connected user. */
   touchLive(): void;
+  /** Connections in voice mode. */
+  voiceCount(): number;
   close(): Promise<void>;
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const str = (v: unknown, max = 200): v is string => typeof v === 'string' && v.length > 0 && v.length <= max;
+
+function toBuffer(data: unknown): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (Array.isArray(data)) return Buffer.concat(data as Buffer[]);
+  if (data instanceof ArrayBuffer) return Buffer.from(data);
+  throw new TypeError('unsupported frame');
+}
 
 export function historyView(session: Session, ctx: Pick<GatewayCtx, 'actions'>): ChatItemView[] {
   const items: ChatItemView[] = [];
@@ -71,6 +86,7 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
   /** One active socket per session. */
   const active = new Map<string, Conn>();
+  const voices = new Set<VoiceSession>();
 
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -110,6 +126,61 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
 
   const err = (c: Conn, code: string, message: string) => send(c, { type: 'error', code, message });
 
+  const sendVoice = (c: Conn, m: ServerMsg | Uint8Array) => {
+    if (!(m instanceof Uint8Array)) return send(c, m);
+    if (c.replaced || c.ws.readyState !== WebSocket.OPEN || c.ws.bufferedAmount > MAX_BUFFERED_AUDIO_BYTES) return;
+    c.ws.send(m, { binary: true });
+  };
+
+  function stopVoice(c: Conn) {
+    const v = c.voice;
+    if (!v) return;
+    c.voice = undefined;
+    voices.delete(v);
+    v.stop();
+  }
+
+  async function startVoice(c: Conn, mode: 'open' | 'ptt') {
+    if (c.voice) return;
+    const vendors = ctx.voice;
+    if (!vendors) return err(c, 'voice_unavailable', 'Voice is not configured on this server.');
+    if (voices.size >= ctx.config.maxVoiceSessions) {
+      return err(c, 'voice_capacity', 'Voice is at capacity right now. Please use text, or try again shortly.');
+    }
+    const session = c.session;
+    const v = new VoiceSession({
+      sttFactory: vendors.stt,
+      ttsPool: new TtsPool(vendors.tts),
+      engine: ctx.engine,
+      actions: ctx.actions,
+      session,
+      metrics: ctx.metrics,
+      send: (m) => sendVoice(c, m),
+      confirm: (id, hash) => confirm(c, id, hash, 'voice'),
+      cancel: async (id) => {
+        const o = await ctx.actions.cancel(session, id);
+        sendResult(c, id, o);
+        return o;
+      },
+      allowTurn: () => ctx.turnLimiter.take(session.id),
+      cfg: {
+        bargeInMinWords: ctx.config.voice.bargeInMinWords, bargeInVadMs: ctx.config.voice.bargeInVadMs,
+        bargeInVadDb: ctx.config.voice.bargeInVadDb, fillerAfterMs: ctx.config.voice.fillerAfterMs, ptt: mode === 'ptt',
+      },
+    });
+    // Reserve the slot before the vendor handshake so concurrent starts cannot exceed the cap.
+    c.voice = v;
+    voices.add(v);
+    try {
+      await v.start();
+    } catch (e) {
+      console.warn('[ws] voice start failed', (e as Error).message);
+      if (c.voice === v) stopVoice(c);
+      return err(c, 'voice_vendor_error', 'Voice could not start right now. You can keep typing.');
+    }
+    if (c.voice !== v || c.replaced) v.stop();
+  }
+
   function onConnection(ws: WebSocket, p: TokenPayload) {
     const now = ctx.now();
     let session = ctx.sessions.get(p.sessionId);
@@ -134,6 +205,7 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
     const old = active.get(p.sessionId);
     active.set(p.sessionId, conn);
     if (old) {
+      stopVoice(old);
       session.activeTurn?.abort.abort();
       old.replaced = true;
       old.ws.close(REPLACED_CODE, 'replaced by a newer connection');
@@ -142,6 +214,7 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
     ws.on('pong', () => { conn.alive = true; });
     ws.on('error', () => {});
     ws.on('close', () => {
+      stopVoice(conn);
       conn.session.lastSeenAt = ctx.now();
       if (active.get(p.sessionId) === conn) {
         active.delete(p.sessionId);
@@ -185,7 +258,19 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
     // A socket that lost the session (replaced or closed) must not drive it, even with messages already queued.
     if (c.replaced || active.get(session.id) !== c) return;
     session.lastSeenAt = ctx.now();
-    if (isBinary) return err(c, 'voice_unavailable', 'Voice is not available yet.');
+    if (isBinary) {
+      if (!ctx.voice) return err(c, 'voice_unavailable', 'Voice is not configured on this server.');
+      // Mic frames that race a voice_stop are dropped silently.
+      if (!c.voice) return;
+      let pcm: Uint8Array;
+      try {
+        pcm = decodeAudioFrame(toBuffer(data)).pcm;
+      } catch {
+        return err(c, 'bad_request', 'Malformed audio frame.');
+      }
+      c.voice.pushAudio(Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength));
+      return;
+    }
     let msg: ClientMsg;
     try {
       const parsed: unknown = JSON.parse(String(data));
@@ -212,7 +297,8 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
       }
       case 'confirm_action': {
         if (!str(msg.proposalId, 128) || !str(msg.termsHash, 128)) return err(c, 'bad_request', 'proposalId and termsHash are required.');
-        return confirm(c, msg.proposalId, msg.termsHash);
+        await confirm(c, msg.proposalId, msg.termsHash);
+        return;
       }
       case 'cancel_action': {
         if (!str(msg.proposalId, 128)) return err(c, 'bad_request', 'proposalId is required.');
@@ -227,11 +313,20 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
         return;
       }
       case 'voice_start':
+        return startVoice(c, msg.mode === 'ptt' ? 'ptt' : 'open');
       case 'voice_stop':
+        return stopVoice(c);
       case 'ptt':
-        return err(c, 'voice_unavailable', 'Voice is not available yet.');
+        if (!c.voice) return err(c, 'voice_not_started', 'Start voice mode first.');
+        c.voice.setPtt(msg.down === true);
+        return;
       case 'playback_report':
+        if (typeof msg.turnSeq === 'number' && typeof msg.playedMs === 'number') c.voice?.onPlaybackReport(msg.turnSeq, msg.playedMs);
+        return;
       case 'client_mark':
+        if (str(msg.turnId, 128) && (msg.mark === 'speech_end' || msg.mark === 'first_audio_played') && typeof msg.t === 'number') {
+          c.voice?.onClientMark(msg.turnId, msg.mark, msg.t);
+        }
         return;
       default:
         return err(c, 'bad_request', 'Unknown message type.');
@@ -242,18 +337,25 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
     send(c, actionResultMsg(proposalId, o));
   }
 
-  async function confirm(c: Conn, proposalId: string, termsHash: string) {
+  /** The one confirm path for both channels: confirm, audit event, action_result, then a snapshot refresh. */
+  async function confirm(c: Conn, proposalId: string, termsHash: string, via: 'ui' | 'voice' = 'ui'): Promise<ActionOutcome> {
     const session = c.session;
     const loanId = (ctx.actions.get(session, proposalId)?.params as { loanId?: unknown } | undefined)?.loanId;
     const turnId = `confirm-${proposalId}`;
     const tctx: ToolContext = {
-      customerId: session.customerId, session, turnId, channel: 'text', connectors: ctx.connectors,
-      tracer: new TurnTracer(turnId, 'text'), signal: AbortSignal.timeout(20_000), today: today(),
+      customerId: session.customerId, session, turnId, channel: via === 'voice' ? 'voice' : 'text', connectors: ctx.connectors,
+      tracer: new TurnTracer(turnId, via === 'voice' ? 'voice' : 'text'), signal: AbortSignal.timeout(20_000), today: today(),
     };
-    const outcome = await ctx.actions.confirm(session, proposalId, termsHash, 'ui', tctx);
-    ctx.eventLog.append(session.id, { type: 'confirm', at: ctx.now(), proposalId, outcome: outcome.status, ...(outcome.reference && { reference: outcome.reference }) });
+    const outcome = await ctx.actions.confirm(session, proposalId, termsHash, via, tctx);
+    ctx.eventLog.append(session.id, { type: 'confirm', at: ctx.now(), proposalId, outcome: outcome.status, via, ...(outcome.reference && { reference: outcome.reference }) });
     sendResult(c, proposalId, outcome);
-    if (outcome.status !== 'executed') return;
+    if (outcome.status !== 'executed') return outcome;
+    void refreshAfterExecution(c, loanId);
+    return outcome;
+  }
+
+  async function refreshAfterExecution(c: Conn, loanId: unknown) {
+    const session = c.session;
     const cid = session.customerId;
     ctx.connectors.invalidate('ops', `ops:requests:${cid}`);
     ctx.connectors.invalidate('lms', `lms:loans:${cid}`);
@@ -278,12 +380,14 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
 
   return {
     liveCount: () => active.size,
+    voiceCount: () => voices.size,
     touchLive() {
       const t = ctx.now();
       for (const c of active.values()) c.session.lastSeenAt = t;
     },
     async close() {
       clearInterval(ping);
+      for (const c of active.values()) stopVoice(c);
       for (const c of wss.clients) c.close(1001, 'server shutting down');
       await new Promise((r) => setTimeout(r, 50));
       for (const c of wss.clients) c.terminate();

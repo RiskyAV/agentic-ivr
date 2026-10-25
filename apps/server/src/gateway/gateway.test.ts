@@ -4,10 +4,11 @@ import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { buildMockServer } from '@app/mock-systems';
-import type { ClientMsg, ServerMsg } from '@app/shared';
+import { encodeAudioFrame, type ClientMsg, type ServerMsg } from '@app/shared';
 import { buildApp, type AppHandle } from '../app.js';
 import { loadConfig, type Config } from '../config.js';
 import { ZERO_CHAOS } from '../platform/tools/testkit.js';
+import { FakeStt, FakeTts } from '../platform/voice/fakes.js';
 import { signToken, verifyToken } from './auth.js';
 
 type Msg = ServerMsg;
@@ -60,13 +61,14 @@ async function login(customerId: string, extraBody: Record<string, unknown> = {}
 
 class Client {
   readonly msgs: Msg[] = [];
+  binaryFrames = 0;
   closeCode?: number;
   private readonly waiters: Array<() => void> = [];
   readonly ws: WebSocket;
   constructor(token: string, url = wsBase) {
     this.ws = new WebSocket(`${url}/ws?token=${encodeURIComponent(token)}`);
     this.ws.on('message', (data, isBinary) => {
-      if (isBinary) return;
+      if (isBinary) { this.binaryFrames++; return; }
       this.msgs.push(JSON.parse(data.toString()) as Msg);
       this.waiters.splice(0).forEach((w) => w());
     });
@@ -417,3 +419,90 @@ describe('main wiring', () => {
     expect(gw.sessions.size()).toBe(m.sessions);
   });
 });
+
+describe('voice over the gateway (fake vendors)', () => {
+  const until = async (pred: () => boolean, ms = 3000) => {
+    const end = Date.now() + ms;
+    while (!pred()) {
+      if (Date.now() > end) throw new Error('timeout');
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  };
+
+  it('routes mic audio to STT, streams TTS frames, caps voice sessions, and confirms by voice through the UI path', async () => {
+    const stts: FakeStt[] = [];
+    const ttss: FakeTts[] = [];
+    const voice = {
+      stt: async (o: { ptt: boolean }) => { const x = new FakeStt(o); stts.push(x); return x; },
+      tts: async () => { const t = new FakeTts(); ttss.push(t); return t; },
+    };
+    const app = await startApp(testConfig({ maxVoiceSessions: 1 }), { voice });
+    const { body } = await login('C1001', {}, app.base);
+    const c = await new Client(body.token, app.wsBase).ready();
+    c.send({ type: 'voice_start' });
+    await until(() => stts.length === 1);
+    expect(stts[0]!.opts.ptt).toBe(false);
+    c.ws.send(encodeAudioFrame(0, new Uint8Array(640)));
+    await until(() => stts[0]!.audio.length === 1);
+    expect(stts[0]!.audio[0]!.length).toBe(640);
+
+    // A second voice session over the cap is refused; text keeps working.
+    const other = await login('C1002', {}, app.base);
+    const c2 = await new Client(other.body.token, app.wsBase).ready();
+    const f2 = c2.msgs.length;
+    c2.send({ type: 'voice_start' });
+    expect((await c2.waitFor('error', f2)).code).toBe('voice_capacity');
+    expect(((await (await fetch(`${app.base}/api/metrics`)).json()) as { voiceSessions: number }).voiceSessions).toBe(1);
+
+    const from = c.msgs.length;
+    stts[0]!.emit('committed', 'please prepay 50k');
+    const start = await c.waitFor('turn_start', from);
+    expect(start).toMatchObject({ channel: 'voice', userText: 'please prepay 50k' });
+    const prop = await c.waitFor('action_proposal', from);
+    await c.waitFor('assistant_done', from);
+    await until(() => c.binaryFrames > 0);
+    expect(c.msgs.slice(from).some((m) => m.type === 'tts_begin')).toBe(true);
+
+    const from2 = c.msgs.length;
+    stts[0]!.emit('committed', 'Yes, go ahead.');
+    const res = await c.waitFor('action_result', from2);
+    expect(res).toMatchObject({ proposalId: prop.proposal.id, status: 'executed' });
+    await c.waitFor('snapshot', from2);
+    const done = await c.waitFor('assistant_done', from2);
+    expect(done.text).toBe(`Done — your reference is ${res.reference}.`);
+    const audit = gwAudit(app.h).filter((e) => e.proposalId === prop.proposal.id).map((e) => e.event);
+    expect(audit.filter((e) => e === 'executed')).toHaveLength(1);
+
+    c.send({ type: 'voice_stop' });
+    await until(() => stts[0]!.closed);
+    const f3 = c2.msgs.length;
+    c2.send({ type: 'voice_start', mode: 'ptt' });
+    await until(() => stts.length === 2);
+    expect(stts[1]!.opts.ptt).toBe(true);
+    c2.send({ type: 'ptt', down: true });
+    c2.ws.send(encodeAudioFrame(0, new Uint8Array(320)));
+    c2.send({ type: 'ptt', down: false });
+    await until(() => stts[1]!.commits === 1);
+    expect(stts[1]!.audio).toHaveLength(1);
+    expect(c2.msgs.slice(f3).filter((m) => m.type === 'error')).toHaveLength(0);
+    await c2.close();
+    await until(() => stts[1]!.closed);
+    await c.close();
+  });
+
+  it('a vendor that cannot connect answers voice_vendor_error and frees the slot', async () => {
+    const voice = { stt: async () => { throw new Error('no network'); }, tts: async () => new FakeTts() };
+    const app = await startApp(testConfig({ maxVoiceSessions: 1 }), { voice });
+    const { body } = await login('C1001', {}, app.base);
+    const c = await new Client(body.token, app.wsBase).ready();
+    const from = c.msgs.length;
+    c.send({ type: 'voice_start' });
+    expect((await c.waitFor('error', from)).code).toBe('voice_vendor_error');
+    expect(app.h.ctx.voiceSessions()).toBe(0);
+    await c.close();
+  });
+});
+
+function gwAudit(h: AppHandle) {
+  return h.ctx.audit.list(100);
+}

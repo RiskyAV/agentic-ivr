@@ -20,7 +20,9 @@ import { loanServicingActions } from './workflows/loan-servicing/actions.js';
 import { loanServicing } from './workflows/loan-servicing/index.js';
 import { loanServicingTools } from './workflows/loan-servicing/tools.js';
 import type { Config } from './config.js';
-import type { GatewayCtx } from './gateway/context.js';
+import type { GatewayCtx, VoiceVendors } from './gateway/context.js';
+import { DEFAULT_KEYTERMS, elevenLabsStt } from './platform/voice/stt.js';
+import { elevenLabsTts } from './platform/voice/tts.js';
 import { registerHttp } from './gateway/http.js';
 import { RateLimiter } from './gateway/rateLimit.js';
 import { attachWs, SESSION_IDLE_MS, SWEEP_EVERY_MS } from './gateway/ws.js';
@@ -30,6 +32,17 @@ export interface AppOptions {
   llm?: LlmClient;
   /** Injectable clock for session and rate-limit logic (tests). */
   now?: () => number;
+  /** Replaces the ElevenLabs STT/TTS factories (tests); `null` disables voice. */
+  voice?: VoiceVendors | null;
+}
+
+function vendorsFrom(config: Config): VoiceVendors | undefined {
+  const v = config.voice;
+  if (!v.elevenLabsApiKey || !v.voiceId) return undefined;
+  return {
+    stt: elevenLabsStt({ apiKey: v.elevenLabsApiKey, silenceSecs: v.sttSilenceSecs, keyterms: DEFAULT_KEYTERMS }),
+    tts: elevenLabsTts({ apiKey: v.elevenLabsApiKey, voiceId: v.voiceId, model: v.ttsModel }),
+  };
 }
 
 export interface AppHandle {
@@ -78,10 +91,13 @@ export async function buildApp(config: Config, opts: AppOptions = {}): Promise<A
     turnLimiter: new RateLimiter(config.turnsPerMin, 60_000, now),
     voiceSessions: () => 0,
   };
+  const vendors = opts.voice === undefined ? vendorsFrom(config) : opts.voice ?? undefined;
+  if (vendors) ctx.voice = vendors;
 
   const app = Fastify({ logger: false });
   registerHttp(app, ctx);
   const ws = attachWs(app.server, ctx);
+  ctx.voiceSessions = () => ws.voiceCount();
   const sweep = setInterval(() => {
     ws.touchLive();
     sessions.sweep(SESSION_IDLE_MS);

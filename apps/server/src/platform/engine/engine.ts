@@ -272,7 +272,7 @@ export class Engine {
       finished = true;
       await cancelHeld();
       await settleVerdict(EARLY_GUARD_WAIT_MS, false);
-      commitHistory(shown && verdict?.verdict !== 'block' ? { role: 'assistant', text: shown, interruptedAt: new Date().toISOString() } : undefined);
+      commitHistory(shown && verdict?.verdict !== 'block' ? { role: 'assistant', text: shown, interruptedAt: shown } : undefined);
       tracer.setMetric('turn_total', Math.round(elapsed()));
       log({ type: 'timing', metrics: { turn_total: Math.round(elapsed()), aborted: 1 } });
       sink.trace(tracer.toTrace());

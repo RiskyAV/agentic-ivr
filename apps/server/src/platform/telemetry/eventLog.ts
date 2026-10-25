@@ -9,7 +9,7 @@ export type LoggedEvent =
   | { type: 'backend_call'; at: number; system: string; method: string; path: string; status?: number; body?: unknown; turnId?: string }
   | { type: 'guard'; at: number; verdict: string; category?: string; by?: string; ms?: number; turnId?: string }
   | { type: 'proposal'; at: number; proposalId: string; actionType: string; termsHash: string; turnId?: string }
-  | { type: 'confirm'; at: number; proposalId: string; outcome: string; reference?: string; turnId?: string }
+  | { type: 'confirm'; at: number; proposalId: string; outcome: string; reference?: string; via?: 'ui' | 'voice'; turnId?: string }
   | { type: 'assistant_final'; at: number; text: string; sources?: unknown[]; unverified?: string[]; status?: string; turnId?: string }
   | { type: 'timing'; at: number; metrics: Record<string, number>; turnId?: string };
 

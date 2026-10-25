@@ -139,6 +139,9 @@ describe('store reducer', () => {
     const s = run([{ type: 'turn_start', turnId: 't1', channel: 'text', userText: 'hi' }, { type: 'error', code: 'rate_limited', message: 'Slow down.' }]);
     expect(s.activeTurn).toBeNull();
     expect(s.notice).toMatchObject({ code: 'rate_limited', message: 'Slow down.' });
+    const v = run([{ type: 'turn_start', turnId: 't1', channel: 'voice', userText: 'hi' }, { type: 'error', code: 'voice_vendor_error', message: 'TTS down.' }]);
+    expect(v.activeTurn).not.toBeNull();
+    expect(v.notice).toMatchObject({ code: 'voice_vendor_error' });
   });
 
   it('the zustand store applies messages through the same reducer', () => {

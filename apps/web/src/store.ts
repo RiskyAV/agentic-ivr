@@ -85,6 +85,8 @@ function setProposal(s: AppState, id: string, patch: (p: Extract<ChatItem, { kin
 const isFinal = (st: ProposalStatus) => st === 'executed' || st === 'rejected' || st === 'failed' || st === 'expired';
 
 /** Pure reducer over server messages. */
+const VOICE_ERRORS = new Set(['voice_unavailable', 'voice_vendor_error', 'voice_capacity', 'voice_not_started']);
+
 export function reduce(s: AppState, m: ServerMsg): AppState {
   switch (m.type) {
     case 'session_ready': {
@@ -155,7 +157,8 @@ export function reduce(s: AppState, m: ServerMsg): AppState {
     case 'error': {
       const notice = { code: m.code, message: m.message, at: Date.now() };
       // Errors that arrive while a turn runs mean no answer is coming.
-      const ended = s.activeTurn && m.code !== 'voice_unavailable' ? endTurn(s, s.activeTurn.turnId) : s;
+      // Voice-side errors (vendor down, capacity) do not stop a text answer that is streaming.
+      const ended = s.activeTurn && !VOICE_ERRORS.has(m.code) ? endTurn(s, s.activeTurn.turnId) : s;
       return { ...ended, notice };
     }
     case 'transcript':

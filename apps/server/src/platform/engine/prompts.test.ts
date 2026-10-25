@@ -91,6 +91,17 @@ describe('buildPrompt', () => {
     expect(build(hist(12)).messages[0]).toMatchObject({ role: 'user', text: 'q0' });
   });
 
+  it('an interrupted answer replays only what the customer heard', () => {
+    const { messages } = build([
+      { role: 'user', text: 'q', channel: 'voice' },
+      { role: 'assistant', text: 'Your next EMI is due on 5 Nov. It will be debited automatically.', interruptedAt: 'Your next EMI is due on 5 Nov.' },
+      { role: 'user', text: 'q2', channel: 'voice' },
+      { role: 'assistant', text: 'Something long.', interruptedAt: '' },
+    ], 'voice');
+    expect(messages[1]).toEqual({ role: 'assistant', text: 'Your next EMI is due on 5 Nov.… [customer interrupted here]' });
+    expect(messages[3]).toEqual({ role: 'assistant', text: '[customer interrupted before hearing this answer]' });
+  });
+
   it('wraps tool history in untrusted_data, paired with a call', () => {
     const { messages } = build([
       { role: 'user', text: 'hi', channel: 'text' },

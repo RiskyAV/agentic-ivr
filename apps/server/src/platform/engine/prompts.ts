@@ -121,7 +121,10 @@ function toMessages(history: HistoryEntry[]): LlmMessage[] {
   kept.forEach((h, i) => {
     if (h.role === 'user') out.push({ role: 'user', text: h.text });
     else if (h.role === 'assistant') {
-      out.push({ role: 'assistant', text: h.interruptedAt ? `${h.text} [customer interrupted here]` : h.text });
+      // An interrupted answer is replayed as far as the customer heard (voice) or saw (text) it.
+      const text = h.interruptedAt === undefined ? h.text
+        : h.interruptedAt ? `${h.interruptedAt}… [customer interrupted here]` : '[customer interrupted before hearing this answer]';
+      out.push({ role: 'assistant', text });
     } else {
       const id = `h${history.length - kept.length + i}`;
       out.push({ role: 'assistant', toolCalls: [{ id, name: h.name, args: {} }] });

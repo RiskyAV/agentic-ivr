@@ -4,6 +4,10 @@ import type { CustomerSnapshot } from './snapshot.js';
 
 export type HistoryEntry =
   | { role: 'user'; text: string; channel: Channel }
+  /**
+   * `interruptedAt`: set when the customer cut the answer off; it holds the part they actually got — the streamed
+   * text for a typed turn, or the words heard up to the barge-in for voice (from TTS alignment and playback position).
+   */
   | { role: 'assistant'; text: string; interruptedAt?: string }
   | { role: 'tool'; name: string; summary: string };
 

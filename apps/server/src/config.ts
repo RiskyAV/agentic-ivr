@@ -22,8 +22,22 @@ export interface Config {
   llmMaxConcurrency: number;
   llmQueueTimeoutMs: number;
   maxVoiceSessions: number;
+  voice: VoiceSettings;
   eventLogDir: string;
   engine: EngineConfig;
+}
+
+export interface VoiceSettings {
+  /** Voice is enabled only when both the ElevenLabs key and a voice id are set. */
+  elevenLabsApiKey?: string;
+  voiceId?: string;
+  ttsModel: string;
+  sttSilenceSecs: number;
+  bargeInMinWords: number;
+  /** Sustained mic energy (ms) that interrupts the assistant; 0 = transcript-only barge-in. */
+  bargeInVadMs: number;
+  bargeInVadDb: number;
+  fillerAfterMs: number;
 }
 
 export class ConfigError extends Error {}
@@ -80,8 +94,19 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     llmMaxConcurrency: num(env, 'LLM_MAX_CONCURRENCY', 50),
     llmQueueTimeoutMs: num(env, 'LLM_QUEUE_TIMEOUT_MS', 4000),
     maxVoiceSessions: num(env, 'MAX_VOICE_SESSIONS', 5, 0),
+    voice: {
+      ...(env.ELEVENLABS_API_KEY?.trim() && { elevenLabsApiKey: env.ELEVENLABS_API_KEY.trim() }),
+      ...(env.ELEVENLABS_VOICE_ID?.trim() && { voiceId: env.ELEVENLABS_VOICE_ID.trim() }),
+      ttsModel: str(env, 'ELEVENLABS_TTS_MODEL', 'eleven_flash_v2_5'),
+      sttSilenceSecs: num(env, 'STT_SILENCE_SECS', 0.45, 0.1),
+      bargeInMinWords: num(env, 'BARGE_IN_MIN_WORDS', 2),
+      bargeInVadMs: num(env, 'BARGE_IN_VAD_MS', 400, 0),
+      bargeInVadDb: num(env, 'BARGE_IN_VAD_DB', -40, -90),
+      fillerAfterMs: num(env, 'FILLER_AFTER_MS', 700, 0),
+    },
     eventLogDir: str(env, 'EVENT_LOG_DIR', fileURLToPath(new URL('../../../.data/events', import.meta.url))),
     engine: engineConfigFromEnv({ ...env, GEMINI_MODEL: model }),
   };
+  if (!config.voice.elevenLabsApiKey || !config.voice.voiceId) warnings.push('ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID not set; voice mode is disabled.');
   return { config, warnings };
 }

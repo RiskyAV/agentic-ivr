@@ -1,0 +1,348 @@
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { decodeAudioFrame, type ServerMsg } from '@app/shared';
+import { ActionService } from '../actions/actionService.js';
+import { AuditLog } from '../actions/audit.js';
+import { loadSnapshot } from '../context/snapshot.js';
+import type { Session } from '../context/session.js';
+import { Engine } from '../engine/engine.js';
+import { Limiter } from '../llm/limiter.js';
+import { StubLlm, type StubRule } from '../llm/stub.js';
+import type { LlmChunk, LlmRequest } from '../llm/types.js';
+import { EventLog } from '../telemetry/eventLog.js';
+import { Metrics } from '../telemetry/metrics.js';
+import { ToolRegistry } from '../tools/registry.js';
+import { makeHarness, makeSession } from '../tools/testkit.js';
+import { WorkflowRegistry } from '../workflows/registry.js';
+import { loanServicing } from '../../workflows/loan-servicing/index.js';
+import { loanServicingActions } from '../../workflows/loan-servicing/actions.js';
+import { loanServicingTools } from '../../workflows/loan-servicing/tools.js';
+import { FakeStt, FakeTts } from './fakes.js';
+import { TtsPool } from './tts.js';
+import { VoiceSession, type VoiceConfig } from './turnManager.js';
+
+const closers: Array<() => Promise<unknown> | void> = [];
+afterEach(async () => { await Promise.all(closers.splice(0).map((c) => c())); });
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(pred: () => boolean, ms = 3000, what = 'condition') {
+  const end = performance.now() + ms;
+  while (!pred()) {
+    if (performance.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await sleep(5);
+  }
+}
+const text = (t: string): LlmChunk => ({ type: 'text', text: t });
+const call = (name: string, args: unknown = {}): LlmChunk => ({ type: 'tool_calls', calls: [{ id: name, name, args }] });
+
+const SENTENCES = [
+  'Your next instalment is due on the fifth of next month. ',
+  'It will be debited from your registered bank account automatically. ',
+  'Please keep enough balance in the account, so the debit does not fail. ',
+  'A failed debit can attract a bounce charge under our policy. ',
+  'You can also pay early from the app if you prefer. ',
+  'Is there anything else I can help you with today? ',
+  'I am happy to explain your schedule as well. ',
+  'Or we could look at prepayment options together. ',
+];
+const EMI_RULE: StubRule = { match: /next EMI/i, script: [SENTENCES.map(text)] };
+const PREPAY_RULE: StubRule = {
+  match: /prepay/i,
+  script: [
+    [call('propose_prepayment', { loanId: 'HL-88231', amount: '50k', mode: 'reduce_tenure' })],
+    [text('I have set up a prepayment of {{proposal.prepay.amount}}. ')],
+  ],
+};
+
+async function setup(opts: {
+  rules: StubRule[];
+  chunkDelayMs?: number;
+  llm?: { stream(req: LlmRequest, signal: AbortSignal): AsyncIterable<LlmChunk> };
+  cfg?: Partial<VoiceConfig>;
+  ttsAuto?: boolean;
+  absoluteAlignment?: boolean;
+  sttFactory?: () => Promise<FakeStt>;
+}) {
+  const h = makeHarness({});
+  closers.push(h.close);
+  const tools = new ToolRegistry();
+  for (const t of loanServicingTools) tools.register(t);
+  const audit = new AuditLog();
+  const actions = new ActionService(loanServicingActions, audit);
+  for (const a of loanServicingActions) tools.register(actions.proposeTool(a.type));
+  const workflows = new WorkflowRegistry().register(loanServicing);
+  const metrics = new Metrics();
+  const engine = new Engine({
+    llm: opts.llm ?? new StubLlm(opts.rules, { chunkDelayMs: opts.chunkDelayMs ?? 0 }),
+    limiter: new Limiter(10, 1000), tools, actions, workflows, connectors: h.connectors,
+    eventLog: new EventLog(mkdtempSync(join(tmpdir(), 'voice-'))), metrics, audit,
+    config: { turnBudgetMs: 9000, maxToolRounds: 4, toolTimeoutMs: 4000 },
+  });
+  const session: Session = makeSession('C1001');
+  session.snapshot = await loadSnapshot(h.connectors, session.customerId, { signal: new AbortController().signal });
+  const stts: FakeStt[] = [];
+  const stt = new FakeStt();
+  stts.push(stt);
+  const ttsList: FakeTts[] = [];
+  const pool = new TtsPool(async () => { const t = new FakeTts(opts.ttsAuto ?? true, 10, opts.absoluteAlignment); ttsList.push(t); return t; });
+  const out: Array<ServerMsg | Uint8Array> = [];
+  const confirm = vi.fn((id: string, hash: string) => actions.confirm(session, id, hash, 'voice', h.ctxFor(session.customerId, 'voice', session)));
+  const cancel = vi.fn((id: string) => actions.cancel(session, id));
+  const vs = new VoiceSession({
+    sttFactory: opts.sttFactory ?? (async () => stt),
+    ttsPool: pool, engine, actions, session, metrics, confirm, cancel,
+    send: (m) => out.push(m),
+    cfg: { bargeInMinWords: 2, fillerAfterMs: 700, ptt: false, bargeInVadMs: 0, ...opts.cfg },
+  });
+  await vs.start();
+  closers.push(() => vs.stop());
+  const msgs = <K extends ServerMsg['type']>(k: K) =>
+    out.filter((m): m is Extract<ServerMsg, { type: K }> => !(m instanceof Uint8Array) && m.type === k);
+  const frames = () => out.filter((m): m is Uint8Array => m instanceof Uint8Array).map((b) => decodeAudioFrame(b));
+  const audioMs = (seq: number) => frames().filter((f) => f.turnSeq === seq).reduce((n, f) => n + f.pcm.length / 48, 0);
+  return { h, engine, session, actions, metrics, stt, stts, ttsList, pool, out, msgs, frames, audioMs, vs, confirm, cancel };
+}
+
+describe('VoiceSession', () => {
+  it('(a) streams clause chunks to TTS before the LLM finishes; frames carry the turn seq', async () => {
+    let lastChunkAt = 0;
+    const stub = new StubLlm([EMI_RULE], { chunkDelayMs: 40 });
+    const llm = {
+      async *stream(req: LlmRequest, signal: AbortSignal) {
+        for await (const c of stub.stream(req, signal)) {
+          if (c.type === 'text') lastChunkAt = performance.now();
+          yield c;
+        }
+      },
+    };
+    const s = await setup({ rules: [], llm });
+    s.stt.emit('committed', "what's my next EMI");
+    await waitFor(() => s.msgs('assistant_done').length === 1 && s.ttsList[0]!.ended, 5000, 'done');
+    const tts = s.ttsList[0]!;
+    const firstSend = tts.ops.find((o) => o.kind === 'text')!;
+    expect(firstSend.t).toBeLessThan(lastChunkAt);
+    expect(tts.texts[0]).toBe(SENTENCES[0]!.trim() + ' ');
+    expect(s.msgs('transcript').at(-1)).toMatchObject({ text: "what's my next EMI", final: true });
+    const start = s.msgs('turn_start')[0]!;
+    expect(start).toMatchObject({ channel: 'voice', userText: "what's my next EMI" });
+    const begin = s.msgs('tts_begin')[0]!;
+    expect(begin.turnId).toBe(start.turnId);
+    expect(begin.turnSeq).toBe(s.session.turnSeq);
+    await waitFor(() => s.msgs('tts_end').length === 1, 2000, 'tts_end');
+    expect(s.frames().length).toBeGreaterThan(0);
+    expect(new Set(s.frames().map((f) => f.turnSeq))).toEqual(new Set([begin.turnSeq]));
+    // Captions mirror the engine deltas.
+    expect(s.msgs('assistant_delta').map((d) => d.text).join('')).toBe(SENTENCES.join(''));
+    // Voice spans and metrics are merged into the engine trace.
+    await waitFor(() => s.msgs('trace').length === 1, 4000, 'trace');
+    const trace = s.msgs('trace')[0]!.trace;
+    expect(trace.spans.map((x) => x.name)).toEqual(expect.arrayContaining(['stt_commit', 'tts_first_audio']));
+    expect(trace.metrics.voice_turn_e2e_server_ms).toBeGreaterThanOrEqual(0);
+    expect(s.metrics.snapshot().voice_first_audio_ms?.n).toBe(1);
+  });
+
+  it('(b) barge-in aborts the turn, stops frames, and records what was heard', async () => {
+    const s = await setup({ rules: [EMI_RULE], chunkDelayMs: 60 });
+    s.stt.emit('committed', "what's my next EMI");
+    await waitFor(() => s.msgs('tts_begin').length === 1);
+    const seq = s.msgs('tts_begin')[0]!.turnSeq;
+    const turnId = s.msgs('tts_begin')[0]!.turnId;
+    await waitFor(() => s.audioMs(seq) >= 700, 3000, 'audio');
+    expect(s.session.activeTurn?.turnId).toBe(turnId);
+    s.stt.emit('partial', 'actually check my');
+    expect(s.msgs('barge_in')).toEqual([{ type: 'barge_in', turnId }]);
+    const n = s.frames().length;
+    const tts = s.ttsList[0]!;
+    expect(tts.closed).toBe(true);
+    await waitFor(() => s.session.activeTurn === undefined, 2000, 'turn end');
+    await sleep(150);
+    expect(s.frames().length).toBe(n);
+    expect(s.msgs('assistant_done')).toHaveLength(0);
+    s.vs.onPlaybackReport(seq, 600);
+    const sent = tts.texts.join('');
+    await waitFor(() => s.session.history.at(-1)?.role === 'assistant');
+    const last = s.session.history.at(-1) as { interruptedAt?: string };
+    expect(last.interruptedAt).toBe(sent.slice(0, 61).trim());
+    // The next utterance becomes the next turn.
+    s.stt.emit('committed', 'actually check my last payment');
+    await waitFor(() => s.msgs('turn_start').length === 2);
+    expect(s.msgs('turn_start')[1]!.userText).toBe('actually check my last payment');
+    await waitFor(() => s.msgs('trace').length >= 1, 4000, 'trace');
+    expect(s.msgs('trace')[0]!.trace.spans.map((x) => x.name)).toContain('barge_in');
+  });
+
+  it('heard text also works when the vendor reports alignment cumulatively across chunks', async () => {
+    const s = await setup({ rules: [EMI_RULE], chunkDelayMs: 60, absoluteAlignment: true });
+    s.stt.emit('committed', "what's my next EMI");
+    await waitFor(() => s.msgs('tts_begin').length === 1);
+    const seq = s.msgs('tts_begin')[0]!.turnSeq;
+    await waitFor(() => s.audioMs(seq) >= 1000, 3000, 'audio');
+    s.stt.emit('partial', 'stop');
+    s.vs.onPlaybackReport(seq, 900);
+    await waitFor(() => s.session.activeTurn === undefined && s.session.history.at(-1)?.role === 'assistant', 2000);
+    const sent = s.ttsList[0]!.texts.join('');
+    expect((s.session.history.at(-1) as { interruptedAt?: string }).interruptedAt).toBe(sent.slice(0, 91).trim());
+  });
+
+  it('sustained voice energy during audio barges in before any transcript; short bursts and quiet noise do not', async () => {
+    const tone = (ms: number, amp: number) => {
+      const b = Buffer.alloc(ms * 32);
+      for (let i = 0; i < b.length / 2; i++) b.writeInt16LE(Math.round(amp * Math.sin((2 * Math.PI * 220 * i) / 16000)), i * 2);
+      return b;
+    };
+    const feed = (ms: number, amp: number) => { for (let t = 0; t < ms; t += 20) s.vs.pushAudio(tone(20, amp)); };
+    const s = await setup({ rules: [EMI_RULE], chunkDelayMs: 60, cfg: { bargeInVadMs: 400 } });
+    feed(600, 8000); // loud speech before the assistant talks: not a barge-in
+    s.stt.emit('committed', "what's my next EMI");
+    await waitFor(() => s.msgs('tts_begin').length === 1);
+    await waitFor(() => s.audioMs(s.msgs('tts_begin')[0]!.turnSeq) > 0);
+    feed(1000, 60); // background noise
+    feed(200, 8000); // a cough
+    feed(200, 60);
+    expect(s.msgs('barge_in')).toHaveLength(0);
+    feed(400, 8000);
+    expect(s.msgs('barge_in')).toHaveLength(1);
+    await waitFor(() => s.msgs('trace').length === 1, 4000);
+    expect(s.msgs('trace')[0]!.trace.spans.find((x) => x.name === 'barge_in')?.attrs).toMatchObject({ trigger: 'vad' });
+  });
+
+  it('(c) a lone filler never barges in; "stop" does', async () => {
+    const s = await setup({ rules: [EMI_RULE], chunkDelayMs: 60 });
+    s.stt.emit('committed', "what's my next EMI");
+    await waitFor(() => s.msgs('tts_begin').length === 1);
+    const seq = s.msgs('tts_begin')[0]!.turnSeq;
+    await waitFor(() => s.audioMs(seq) > 0);
+    s.stt.emit('partial', 'um');
+    s.stt.emit('partial', 'hmm');
+    expect(s.msgs('barge_in')).toHaveLength(0);
+    expect(s.session.activeTurn).toBeDefined();
+    s.stt.emit('partial', 'stop');
+    expect(s.msgs('barge_in')).toHaveLength(1);
+  });
+
+  it('a partial that echoes the assistant is ignored, and no barge-in happens without audio', async () => {
+    const s = await setup({ rules: [EMI_RULE], chunkDelayMs: 60 });
+    s.stt.emit('committed', "what's my next EMI");
+    await waitFor(() => s.msgs('tts_begin').length === 1);
+    // Before any audio: not speaking, so no barge-in from a partial.
+    s.stt.emit('partial', 'check my payments');
+    expect(s.msgs('barge_in')).toHaveLength(0);
+    const seq = s.msgs('tts_begin')[0]!.turnSeq;
+    await waitFor(() => s.audioMs(seq) > 0);
+    s.stt.emit('partial', 'next instalment is due on the fifth');
+    expect(s.msgs('barge_in')).toHaveLength(0);
+    s.stt.emit('committed', 'next instalment is due on the fifth');
+    expect(s.msgs('turn_start')).toHaveLength(1);
+  });
+
+  it('(d) a slow tool gets the filler spoken before any answer text', async () => {
+    const s = await setup({
+      rules: [{ match: /EMI go up/i, script: [[call('explain_emi_change')], [text('Your EMI went up because of a rate reset. ')]] }],
+    });
+    await s.h.app.inject({ method: 'PUT', url: '/admin/chaos', payload: { lms: { extraLatencyMs: 1500 } } });
+    s.stt.emit('committed', 'why did my EMI go up');
+    await waitFor(() => s.msgs('assistant_done').length === 1, 8000, 'done');
+    const texts = s.ttsList[0]!.texts;
+    expect(texts[0]).toContain('Let me look into that EMI change');
+    expect(texts.findIndex((t) => t.includes('rate reset'))).toBeGreaterThan(0);
+    expect(texts.filter((t) => t.includes('Let me look'))).toHaveLength(1);
+    await waitFor(() => s.msgs('trace').length === 1, 4000, 'trace');
+    expect(s.msgs('trace')[0]!.trace.spans.map((x) => x.name)).toContain('filler');
+  }, 15000);
+
+  it('a fast tool gets no filler', async () => {
+    const s = await setup({
+      rules: [{ match: /EMI go up/i, script: [[call('explain_emi_change')], [text('Your EMI went up because of a rate reset. ')]] }],
+    });
+    s.stt.emit('committed', 'why did my EMI go up');
+    await waitFor(() => s.msgs('assistant_done').length === 1, 4000, 'done');
+    await sleep(800);
+    expect(s.ttsList[0]!.texts.some((t) => t.includes('Let me look'))).toBe(false);
+  });
+
+  it('(e) barge-in during a read-back keeps the proposal pending; "yes but" goes to the engine; "yes" confirms once', async () => {
+    const s = await setup({ rules: [PREPAY_RULE] });
+    s.stt.emit('committed', 'I want to prepay fifty thousand');
+    await waitFor(() => s.msgs('action_proposal').length === 1, 4000, 'proposal');
+    const prop = s.msgs('action_proposal')[0]!.proposal;
+    const tts = s.ttsList[0]!;
+    await waitFor(() => tts.texts.some((t) => t.includes('Shall I go ahead?')), 2000, 'read-back');
+    const readBack = tts.texts.find((t) => t.includes('Shall I go ahead?'))!;
+    expect(readBack).not.toContain('₹');
+    expect(readBack).toContain('fifty thousand');
+    const seq = s.msgs('tts_begin')[0]!.turnSeq;
+    await waitFor(() => s.audioMs(seq) > 0);
+    s.stt.emit('partial', 'wait a second');
+    expect(s.msgs('barge_in')).toHaveLength(1);
+    await sleep(50);
+    expect(s.actions.pending(s.session.id).map((p) => p.id)).toEqual([prop.id]);
+
+    s.stt.emit('committed', 'yes but make it 30k');
+    await waitFor(() => s.msgs('turn_start').length === 2);
+    expect(s.msgs('turn_start')[1]!.userText).toBe('yes but make it 30k');
+    await waitFor(() => s.msgs('assistant_done').length === 2, 4000, 'second done');
+    expect(s.confirm).not.toHaveBeenCalled();
+    expect(s.actions.pending(s.session.id)).toHaveLength(1);
+
+    s.stt.emit('committed', 'Yes.');
+    await waitFor(() => s.confirm.mock.calls.length === 1 && s.msgs('assistant_done').length === 3, 4000, 'confirm');
+    expect(s.confirm).toHaveBeenCalledWith(prop.id, prop.termsHash);
+    expect(s.actions.get(s.session, prop.id)?.status).toBe('executed');
+    const done = s.msgs('assistant_done')[2]!.text;
+    expect(done).toMatch(/^Done — your reference is SR-\d+\.$/);
+    const spoken = s.ttsList.at(-2)!.texts.join('');
+    expect(spoken).toMatch(/your reference is SR( \d){6}\./);
+    s.stt.emit('committed', 'yes');
+    await sleep(100);
+    expect(s.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('a plain "no" with one pending proposal cancels it', async () => {
+    const s = await setup({ rules: [PREPAY_RULE] });
+    s.stt.emit('committed', 'I want to prepay fifty thousand');
+    await waitFor(() => s.msgs('action_proposal').length === 1 && s.msgs('assistant_done').length === 1, 4000);
+    s.stt.emit('committed', 'No.');
+    await waitFor(() => s.cancel.mock.calls.length === 1 && s.msgs('assistant_done').length === 2, 2000);
+    expect(s.actions.pending(s.session.id)).toHaveLength(0);
+    expect(s.ttsList.at(-2)!.texts.join('')).toContain("Okay, I've cancelled that.");
+  });
+
+  it('push-to-talk: release commits; press during audio barges in; audio is only forwarded while held', async () => {
+    const s = await setup({ rules: [EMI_RULE], chunkDelayMs: 60, cfg: { ptt: true } });
+    s.vs.pushAudio(Buffer.alloc(640));
+    expect(s.stt.audio).toHaveLength(0);
+    s.vs.setPtt(true);
+    s.vs.pushAudio(Buffer.alloc(640));
+    s.vs.setPtt(false);
+    expect(s.stt.audio).toHaveLength(1);
+    expect(s.stt.commits).toBe(1);
+    s.stt.emit('committed', "what's my next EMI");
+    await waitFor(() => s.msgs('tts_begin').length === 1);
+    await waitFor(() => s.audioMs(s.msgs('tts_begin')[0]!.turnSeq) > 0);
+    s.vs.setPtt(true);
+    expect(s.msgs('barge_in')).toHaveLength(1);
+  });
+
+  it('STT failure reconnects once, then reports voice_vendor_error', async () => {
+    const stts: FakeStt[] = [];
+    const s = await setup({ rules: [EMI_RULE], sttFactory: async () => { const x = new FakeStt(); stts.push(x); return x; } });
+    stts[0]!.emit('error', new Error('boom'));
+    await waitFor(() => stts.length === 2);
+    expect(s.msgs('error')).toHaveLength(0);
+    stts[1]!.emit('error', new Error('boom again'));
+    await waitFor(() => s.msgs('error').length === 1);
+    expect(s.msgs('error')[0]!.code).toBe('voice_vendor_error');
+  });
+
+  it('a TTS failure still streams the text answer', async () => {
+    const s = await setup({ rules: [EMI_RULE], ttsAuto: false });
+    s.stt.emit('committed', "what's my next EMI");
+    await waitFor(() => s.ttsList[0]!.texts.length > 0);
+    s.ttsList[0]!.fail();
+    await waitFor(() => s.msgs('assistant_done').length === 1, 3000);
+    expect(s.msgs('error').map((e) => e.code)).toEqual(['voice_vendor_error']);
+    expect(s.msgs('tts_end')).toHaveLength(1);
+  });
+});
