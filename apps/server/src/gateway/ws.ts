@@ -4,6 +4,7 @@ import { today } from '@app/domain';
 import { decodeAudioFrame, type ChatItemView, type ClientMsg, type ServerMsg } from '@app/shared';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { ActionOutcome } from '../platform/actions/types.js';
+import type { CallEvent } from '../platform/connectors/resilientClient.js';
 import type { Session } from '../platform/context/session.js';
 import { loadSnapshot, toSnapshotView } from '../platform/context/snapshot.js';
 import type { TurnSink } from '../platform/engine/engine.js';
@@ -228,7 +229,14 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
     const ready = (async () => {
       if (!session.snapshot) {
         try {
-          session.snapshot = await loadSnapshot(ctx.connectors, p.customerId, { signal: AbortSignal.timeout(10_000) });
+          // The backend responses are logged (no turn id) so `npm run replay` can serve the session's snapshot from the log.
+          const observer = {
+            onCall: (e: CallEvent) => ctx.eventLog.append(session.id, {
+              type: 'backend_call', at: ctx.now(), system: e.system, method: e.method ?? 'GET', path: e.path ?? e.key, outcome: e.outcome,
+              ...(e.status !== undefined && { status: e.status }), ...(e.body !== undefined && { body: e.body }),
+            }),
+          };
+          session.snapshot = await loadSnapshot(ctx.connectors, p.customerId, { signal: AbortSignal.timeout(10_000), observer });
         } catch (e) {
           console.warn('[ws] snapshot load failed', (e as Error).message);
         }

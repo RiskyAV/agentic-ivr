@@ -3,10 +3,10 @@ import { join } from 'node:path';
 import { redact } from '../context/redact.js';
 
 export type LoggedEvent =
-  | { type: 'user_input'; at: number; text: string; turnId?: string; channel?: string }
+  | { type: 'user_input'; at: number; text: string; turnId?: string; channel?: string; workflowId?: string; customerId?: string }
   | { type: 'llm_request'; at: number; promptHash: string; prefixHash?: string; model?: string; round?: number; turnId?: string }
   | { type: 'llm_response'; at: number; chunks: unknown[]; usage?: unknown; round?: number; turnId?: string }
-  | { type: 'backend_call'; at: number; system: string; method: string; path: string; status?: number; body?: unknown; turnId?: string }
+  | { type: 'backend_call'; at: number; system: string; method: string; path: string; status?: number; body?: unknown; outcome?: string; turnId?: string }
   | { type: 'guard'; at: number; verdict: string; category?: string; by?: string; ms?: number; turnId?: string }
   | { type: 'proposal'; at: number; proposalId: string; actionType: string; termsHash: string; turnId?: string }
   | { type: 'confirm'; at: number; proposalId: string; outcome: string; reference?: string; via?: 'ui' | 'voice'; turnId?: string }

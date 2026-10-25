@@ -12,7 +12,11 @@
   "scripts": {
     "dev": "concurrently -n mocks,server,web -c blue,green,magenta \"tsx watch apps/mock-systems/src/main.ts\" \"tsx watch apps/server/src/main.ts\" \"npm run dev -w @app/web\"",
     "test": "vitest run",
-    "build": "tsc -b && npm run build -w @app/web"
+    "build": "tsc -b && npm run build -w @app/web",
+    "eval": "tsx scripts/eval/golden.ts",
+    "bench": "tsx scripts/bench.ts",
+    "load": "tsx scripts/load.ts",
+    "replay": "tsx scripts/replay.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

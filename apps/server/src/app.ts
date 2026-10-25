@@ -3,7 +3,7 @@ import { DEMO_CUSTOMERS } from '@app/mock-systems';
 import { ActionService } from './platform/actions/actionService.js';
 import { AuditLog } from './platform/actions/audit.js';
 import { buildConnectors } from './platform/connectors/clients.js';
-import { fetchTransport } from './platform/connectors/transport.js';
+import { fetchTransport, type Transport } from './platform/connectors/transport.js';
 import { InMemorySessionStore, type SessionStore } from './platform/context/session.js';
 import { Engine } from './platform/engine/engine.js';
 import { Guard } from './platform/guard/guard.js';
@@ -37,6 +37,10 @@ export interface AppOptions {
   now?: () => number;
   /** Replaces the ElevenLabs STT/TTS factories (tests); `null` disables voice. */
   voice?: VoiceVendors | null;
+  /** Replaces the HTTP transport to the mock systems (deterministic replay). */
+  transport?: Transport;
+  /** Replaces the model behind the guard classifier (deterministic replay). */
+  guardLlm?: LlmClient;
 }
 
 function vendorsFrom(config: Config): VoiceVendors | undefined {
@@ -63,14 +67,15 @@ export async function buildApp(config: Config, opts: AppOptions = {}): Promise<A
   const now = opts.now ?? (() => Date.now());
   const llm: LlmClient =
     opts.llm ??
-    (config.llmProvider === 'gemini' ? new GeminiClient(config.geminiApiKey!, config.model) : new StubLlm(DEFAULT_STUB_RULES));
+    (config.llmProvider === 'gemini' ? new GeminiClient(config.geminiApiKey!, config.model) : new StubLlm(DEFAULT_STUB_RULES, { chunkDelayMs: config.stubChunkDelayMs }));
   // Under the stub there is no classifier model: the guard keeps its rules and the model step always allows.
   const guardLlm: LlmClient =
-    config.llmProvider === 'stub' && !opts.llm
+    opts.guardLlm ??
+    (config.llmProvider === 'stub' && !opts.llm
       ? new StubLlm([{ match: /[\s\S]*/, script: [[{ type: 'text', text: '{"verdict":"allow"}' }]] }])
-      : llm;
+      : llm);
 
-  const connectors = buildConnectors(fetchTransport(config.mockBaseUrl));
+  const connectors = buildConnectors(opts.transport ?? fetchTransport(config.mockBaseUrl));
   const audit = new AuditLog();
   const actions = new ActionService([...loanServicingActions, ...collectionsActions], audit);
   const tools = new ToolRegistry();
