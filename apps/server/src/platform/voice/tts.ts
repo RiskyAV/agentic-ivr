@@ -138,6 +138,7 @@ export class TtsPool {
   }
 
   async take(): Promise<TtsStream> {
+    if (this.closed) throw new Error('tts pool closed');
     const w = this.warm;
     const age = this.now() - this.warmAt;
     this.warm = undefined;
@@ -145,7 +146,9 @@ export class TtsPool {
       let s = w ? await w : null;
       // ElevenLabs closes idle sockets (inactivity_timeout=180 s); recycle well before that.
       if (s && (!s.alive() || age > (this.opts.maxAgeMs ?? 150_000))) { s.close(); s = null; }
-      return s ?? (await this.factory());
+      s ??= await this.factory();
+      if (this.closed) { s.close(); throw new Error('tts pool closed'); }
+      return s;
     } finally {
       this.prewarm();
     }

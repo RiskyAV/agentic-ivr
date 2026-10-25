@@ -34,7 +34,7 @@ const ERROR_TYPES = new Set([
 /** Per-request complaints (e.g. a push-to-talk tap with no speech): the session itself is fine. */
 const IGNORED_TYPES = new Set(['commit_throttled', 'insufficient_audio_activity']);
 /** Session-ending messages that are not faults: the caller reconnects on demand. */
-const END_TYPES = new Set(['session_time_limit_exceeded']);
+const END_TYPES = new Set(['session_time_limit_exceeded', 'inactivity_timeout', 'session_timeout']);
 
 export function sttUrl(cfg: ElevenLabsSttConfig, ptt: boolean): string {
   const q = new URLSearchParams({
@@ -99,7 +99,8 @@ export function elevenLabsStt(cfg: ElevenLabsSttConfig): SttFactory {
       ws.on('close', (code) => {
         clearTimeout(timer);
         if (!started) { reject(new Error(`stt closed before session start (${code})`)); return; }
-        end(code === 1000 ? 'close' : 'error', new Error(`stt socket closed (${code})`));
+        // 1000/1001: the vendor ended an idle or expired session normally; reconnect on demand, not a fault.
+        end(code === 1000 || code === 1001 ? 'close' : 'error', new Error(`stt socket closed (${code})`));
       });
     });
 }

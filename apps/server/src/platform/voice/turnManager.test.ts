@@ -90,10 +90,14 @@ async function setup(opts: {
   const out: Array<ServerMsg | Uint8Array> = [];
   const confirm = vi.fn((id: string, hash: string) => actions.confirm(session, id, hash, 'voice', h.ctxFor(session.customerId, 'voice', session)));
   const cancel = vi.fn((id: string) => actions.cancel(session, id));
+  const logged: Array<Record<string, unknown>> = [];
+  let dead = 0;
   const vs = new VoiceSession({
     sttFactory: opts.sttFactory ?? (async () => stt),
     ttsPool: pool, engine, actions, session, metrics, confirm, cancel,
     send: (m) => out.push(m),
+    log: (ev) => logged.push(ev),
+    onDead: () => { dead++; },
     cfg: { bargeInMinWords: 2, fillerAfterMs: 700, ptt: false, bargeInVadMs: 0, ...opts.cfg },
   });
   await vs.start();
@@ -102,7 +106,8 @@ async function setup(opts: {
     out.filter((m): m is Extract<ServerMsg, { type: K }> => !(m instanceof Uint8Array) && m.type === k);
   const frames = () => out.filter((m): m is Uint8Array => m instanceof Uint8Array).map((b) => decodeAudioFrame(b));
   const audioMs = (seq: number) => frames().filter((f) => f.turnSeq === seq).reduce((n, f) => n + f.pcm.length / 48, 0);
-  return { h, engine, session, actions, metrics, stt, stts, ttsList, pool, out, msgs, frames, audioMs, vs, confirm, cancel };
+  const tts_ends = (seq: number) => msgs('tts_end').filter((m) => m.turnSeq === seq).length;
+  return { h, engine, session, actions, metrics, stt, stts, ttsList, pool, out, msgs, frames, audioMs, vs, confirm, cancel, logged, dead: () => dead, tts_ends };
 }
 
 describe('VoiceSession', () => {
@@ -186,26 +191,68 @@ describe('VoiceSession', () => {
     expect((s.session.history.at(-1) as { interruptedAt?: string }).interruptedAt).toBe(sent.slice(0, 91).trim());
   });
 
-  it('sustained voice energy during audio barges in before any transcript; short bursts and quiet noise do not', async () => {
-    const tone = (ms: number, amp: number) => {
-      const b = Buffer.alloc(ms * 32);
-      for (let i = 0; i < b.length / 2; i++) b.writeInt16LE(Math.round(amp * Math.sin((2 * Math.PI * 220 * i) / 16000)), i * 2);
-      return b;
-    };
-    const feed = (ms: number, amp: number) => { for (let t = 0; t < ms; t += 20) s.vs.pushAudio(tone(20, amp)); };
-    const s = await setup({ rules: [EMI_RULE], chunkDelayMs: 60, cfg: { bargeInVadMs: 400 } });
-    feed(600, 8000); // loud speech before the assistant talks: not a barge-in
+  const tone = (ms: number, amp: number) => {
+    const b = Buffer.alloc(ms * 32);
+    for (let i = 0; i < b.length / 2; i++) b.writeInt16LE(Math.round(amp * Math.sin((2 * Math.PI * 220 * i) / 16000)), i * 2);
+    return b;
+  };
+  const feeder = (vs: VoiceSession) => (ms: number, amp: number) => { for (let t = 0; t < ms; t += 20) vs.pushAudio(tone(20, amp)); };
+
+  it('sustained voice energy (500 ms) during audio barges in before any transcript; short bursts and quiet noise do not', async () => {
+    const s = await setup({ rules: [EMI_RULE], chunkDelayMs: 60, cfg: { bargeInVadMs: 500 } });
+    const feed = feeder(s.vs);
+    feed(600, 8000); // loud speech before the assistant talks: not a barge-in, and not carried over
     s.stt.emit('committed', "what's my next EMI");
     await waitFor(() => s.msgs('tts_begin').length === 1);
     await waitFor(() => s.audioMs(s.msgs('tts_begin')[0]!.turnSeq) > 0);
+    feed(20, 8000);
+    expect(s.msgs('barge_in')).toHaveLength(0);
     feed(1000, 60); // background noise
-    feed(200, 8000); // a cough
+    feed(300, 8000); // a cough
     feed(200, 60);
     expect(s.msgs('barge_in')).toHaveLength(0);
     feed(400, 8000);
+    expect(s.msgs('barge_in')).toHaveLength(0);
+    feed(100, 8000);
     expect(s.msgs('barge_in')).toHaveLength(1);
     await waitFor(() => s.msgs('trace').length === 1, 4000);
     expect(s.msgs('trace')[0]!.trace.spans.find((x) => x.name === 'barge_in')?.attrs).toMatchObject({ trigger: 'vad' });
+  });
+
+  it('steady noise above the old fixed threshold is learnt as the floor and never triggers', async () => {
+    const s = await setup({ rules: [EMI_RULE], chunkDelayMs: 60, cfg: { bargeInVadMs: 500 } });
+    const feed = feeder(s.vs);
+    feed(6000, 600); // about -35 dBFS fan/street noise, above the -40 dBFS absolute threshold
+    s.stt.emit('committed', "what's my next EMI");
+    await waitFor(() => s.msgs('tts_begin').length === 1);
+    await waitFor(() => s.audioMs(s.msgs('tts_begin')[0]!.turnSeq) > 0);
+    feed(1000, 600);
+    expect(s.msgs('barge_in')).toHaveLength(0);
+    feed(520, 8000); // real speech over the noise
+    expect(s.msgs('barge_in')).toHaveLength(1);
+  });
+
+  it('an energy barge-in with no words after it records barge_in_unconfirmed and invites the customer to go on', async () => {
+    const s = await setup({ rules: [EMI_RULE], chunkDelayMs: 60, cfg: { bargeInVadMs: 500, bargeInConfirmMs: 200 } });
+    const feed = feeder(s.vs);
+    s.stt.emit('committed', "what's my next EMI");
+    await waitFor(() => s.msgs('tts_begin').length === 1);
+    await waitFor(() => s.audioMs(s.msgs('tts_begin')[0]!.turnSeq) > 0);
+    feed(520, 8000);
+    expect(s.msgs('barge_in')).toHaveLength(1);
+    await waitFor(() => s.ttsList.some((t) => t.texts.join('').includes('Sorry, go ahead.')), 2000, 'prompt');
+    expect(s.metrics.snapshot().voice_barge_in_unconfirmed?.n).toBe(1);
+
+    // Confirmed by words: no prompt.
+    const s2 = await setup({ rules: [EMI_RULE], chunkDelayMs: 60, cfg: { bargeInVadMs: 500, bargeInConfirmMs: 200 } });
+    s2.stt.emit('committed', "what's my next EMI");
+    await waitFor(() => s2.msgs('tts_begin').length === 1);
+    await waitFor(() => s2.audioMs(s2.msgs('tts_begin')[0]!.turnSeq) > 0);
+    feeder(s2.vs)(520, 8000);
+    s2.stt.emit('partial', 'check my');
+    await sleep(350);
+    expect(s2.metrics.snapshot().voice_barge_in_unconfirmed).toBeUndefined();
+    expect(s2.ttsList.some((t) => t.texts.join('').includes('Sorry, go ahead.'))).toBe(false);
   });
 
   it('(c) a lone filler never barges in; "stop" does', async () => {
@@ -262,7 +309,16 @@ describe('VoiceSession', () => {
     expect(s.ttsList[0]!.texts.some((t) => t.includes('Let me look'))).toBe(false);
   });
 
-  it('(e) barge-in during a read-back keeps the proposal pending; "yes but" goes to the engine; "yes" confirms once', async () => {
+  /** Proposal turn; resolves once its read-back utterance has been fully spoken (TTS final arrived). */
+  async function proposed(s: Awaited<ReturnType<typeof setup>>) {
+    s.stt.emit('committed', 'I want to prepay fifty thousand');
+    await waitFor(() => s.msgs('action_proposal').length === 1 && s.msgs('assistant_done').length === 1, 4000, 'proposal');
+    const seq = s.msgs('tts_begin')[0]!.turnSeq;
+    await waitFor(() => s.tts_ends(seq) === 1, 2000, 'read-back spoken');
+    return s.msgs('action_proposal')[0]!.proposal;
+  }
+
+  it('(e) barge-in during a read-back keeps it pending; "yes" then re-reads; "yes" after the re-read confirms once; "yes but" goes to the engine', async () => {
     const s = await setup({ rules: [PREPAY_RULE] });
     s.stt.emit('committed', 'I want to prepay fifty thousand');
     await waitFor(() => s.msgs('action_proposal').length === 1, 4000, 'proposal');
@@ -284,19 +340,84 @@ describe('VoiceSession', () => {
     expect(s.msgs('turn_start')[1]!.userText).toBe('yes but make it 30k');
     await waitFor(() => s.msgs('assistant_done').length === 2, 4000, 'second done');
     expect(s.confirm).not.toHaveBeenCalled();
-    expect(s.actions.pending(s.session.id)).toHaveLength(1);
 
+    // The read-back was cut off, so "yes" is not consent yet: read it back again.
     s.stt.emit('committed', 'Yes.');
-    await waitFor(() => s.confirm.mock.calls.length === 1 && s.msgs('assistant_done').length === 3, 4000, 'confirm');
+    await waitFor(() => s.msgs('turn_start').length === 3 && s.msgs('assistant_done').length === 3, 2000, 're-read');
+    expect(s.confirm).not.toHaveBeenCalled();
+    const reread = s.msgs('tts_begin').at(-1)!;
+    await waitFor(() => s.ttsList.some((t) => t.texts.join('').startsWith('Just to confirm')), 2000);
+    const rereadTts = s.ttsList.find((t) => t.texts.join('').startsWith('Just to confirm'))!;
+    expect(rereadTts.texts.join('')).toMatch(/^Just to confirm: Prepay fifty thousand rupees.*Shall I go ahead\? $/);
+    expect(s.msgs('assistant_done')[2]!.text).toMatch(/^Just to confirm: Prepay ₹50,000/);
+    await waitFor(() => s.tts_ends(reread.turnSeq) === 1, 2000, 're-read spoken');
+    expect(s.logged.filter((e) => e.type === 'user_input').map((e) => e.text)).toEqual(['Yes.']);
+
+    s.stt.emit('committed', 'yes');
+    await waitFor(() => s.confirm.mock.calls.length === 1 && s.msgs('assistant_done').length === 4, 4000, 'confirm');
     expect(s.confirm).toHaveBeenCalledWith(prop.id, prop.termsHash);
     expect(s.actions.get(s.session, prop.id)?.status).toBe('executed');
-    const done = s.msgs('assistant_done')[2]!.text;
-    expect(done).toMatch(/^Done — your reference is SR-\d+\.$/);
-    const spoken = s.ttsList.at(-2)!.texts.join('');
-    expect(spoken).toMatch(/your reference is SR( \d){6}\./);
+    expect(s.msgs('assistant_done')[3]!.text).toMatch(/^Done — your reference is SR-\d+\.$/);
+    await waitFor(() => s.ttsList.some((t) => /your reference is SR( \d){6}\./.test(t.texts.join(''))), 2000);
+    expect(s.logged.filter((e) => e.type === 'user_input')).toHaveLength(2);
     s.stt.emit('committed', 'yes');
     await sleep(100);
     expect(s.confirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('a fully heard read-back makes the next "yes" a confirmation', async () => {
+    const s = await setup({ rules: [PREPAY_RULE] });
+    const prop = await proposed(s);
+    s.stt.emit('committed', 'Yes, go ahead.');
+    await waitFor(() => s.confirm.mock.calls.length === 1, 3000);
+    expect(s.confirm).toHaveBeenCalledWith(prop.id, prop.termsHash);
+  });
+
+  it('"yes" while a proposal is held but not yet surfaced never confirms or executes it', async () => {
+    const s = await setup({
+      rules: [{
+        match: /prepay/i,
+        script: [
+          [call('propose_prepayment', { loanId: 'HL-88231', amount: '50k', mode: 'reduce_tenure' })],
+          SENTENCES.map(text),
+        ],
+      }],
+      chunkDelayMs: 60,
+    });
+    s.stt.emit('committed', 'I want to prepay fifty thousand');
+    await waitFor(() => s.actions.pending(s.session.id).length === 1, 4000, 'held');
+    expect(s.msgs('action_proposal')).toHaveLength(0);
+    const held = s.actions.pending(s.session.id)[0]!;
+    s.stt.emit('committed', 'yes');
+    await waitFor(() => s.msgs('turn_start').length === 2, 2000);
+    expect(s.msgs('turn_start')[1]!.userText).toBe('yes');
+    await waitFor(() => s.msgs('assistant_done').length >= 1, 4000);
+    await sleep(100);
+    expect(s.confirm).not.toHaveBeenCalled();
+    expect(s.actions.get(s.session, held.id)?.status).not.toBe('executed');
+  });
+
+  it('"yes" after an unrelated assistant answer re-reads the proposal instead of confirming', async () => {
+    const s = await setup({ rules: [PREPAY_RULE, EMI_RULE] });
+    const prop = await proposed(s);
+    s.stt.emit('committed', "what's my next EMI");
+    await waitFor(() => s.msgs('assistant_done').length === 2, 4000);
+    s.stt.emit('committed', 'yes');
+    await waitFor(() => s.msgs('assistant_done').length === 3, 2000);
+    expect(s.confirm).not.toHaveBeenCalled();
+    expect(s.msgs('assistant_done')[2]!.text).toContain('Just to confirm');
+    expect(s.actions.pending(s.session.id).map((p) => p.id)).toEqual([prop.id]);
+  });
+
+  it('a proposal confirmed in the UI is no longer awaiting a spoken yes', async () => {
+    const s = await setup({ rules: [PREPAY_RULE] });
+    const prop = await proposed(s);
+    await s.actions.cancel(s.session, prop.id);
+    s.vs.proposalResolved(prop.id);
+    s.stt.emit('committed', 'yes');
+    await waitFor(() => s.msgs('turn_start').length === 2, 2000);
+    expect(s.msgs('turn_start')[1]!.userText).toBe('yes');
+    expect(s.confirm).not.toHaveBeenCalled();
   });
 
   it('a plain "no" with one pending proposal cancels it', async () => {
@@ -306,7 +427,7 @@ describe('VoiceSession', () => {
     s.stt.emit('committed', 'No.');
     await waitFor(() => s.cancel.mock.calls.length === 1 && s.msgs('assistant_done').length === 2, 2000);
     expect(s.actions.pending(s.session.id)).toHaveLength(0);
-    expect(s.ttsList.at(-2)!.texts.join('')).toContain("Okay, I've cancelled that.");
+    await waitFor(() => s.ttsList.some((t) => t.texts.join('').includes("Okay, I've cancelled that.")), 2000);
   });
 
   it('push-to-talk: release commits; press during audio barges in; audio is only forwarded while held', async () => {
@@ -334,6 +455,56 @@ describe('VoiceSession', () => {
     stts[1]!.emit('error', new Error('boom again'));
     await waitFor(() => s.msgs('error').length === 1);
     expect(s.msgs('error')[0]!.code).toBe('voice_vendor_error');
+  });
+
+  it('after giving up on STT the slot is released once, and the pool opens nothing more', async () => {
+    const stts: FakeStt[] = [];
+    const s = await setup({ rules: [EMI_RULE], sttFactory: async () => { const x = new FakeStt(); stts.push(x); return x; } });
+    stts[0]!.emit('error', new Error('a'));
+    await waitFor(() => stts.length === 2);
+    stts[1]!.emit('error', new Error('b'));
+    await waitFor(() => s.dead() === 1);
+    const n = s.ttsList.length;
+    await expect(s.pool.take()).rejects.toThrow(/closed/);
+    expect(s.ttsList.length).toBe(n);
+    expect(s.msgs('error')).toHaveLength(1);
+  });
+
+  it('an idle vendor close is not an error: PTT reconnects on press, replays the pending commit, and never gives up', async () => {
+    const stts: FakeStt[] = [];
+    let gate: (() => void) | undefined;
+    const s = await setup({
+      rules: [EMI_RULE], cfg: { ptt: true },
+      sttFactory: async () => {
+        if (stts.length > 0) await new Promise<void>((r) => { gate = r; });
+        const x = new FakeStt({ ptt: true }); stts.push(x); return x;
+      },
+    });
+    for (let i = 0; i < 3; i++) {
+      stts.at(-1)!.emit('close');
+      s.vs.setPtt(true);
+      s.vs.pushAudio(Buffer.alloc(640));
+      s.vs.setPtt(false); // released before the reconnect finished
+      await waitFor(() => gate !== undefined);
+      const g = gate!; gate = undefined; g();
+      await waitFor(() => stts.length === i + 2);
+      expect(stts.at(-1)!.audio).toHaveLength(1);
+      expect(stts.at(-1)!.commits).toBe(1);
+    }
+    expect(s.msgs('error')).toHaveLength(0);
+    expect(s.dead()).toBe(0);
+  });
+
+  it('PTT mode keeps the STT socket alive with silent frames while the button is up', async () => {
+    const s = await setup({ rules: [EMI_RULE], cfg: { ptt: true, sttKeepaliveMs: 30 } });
+    await sleep(120);
+    expect(s.stt.audio.length).toBeGreaterThanOrEqual(2);
+    expect(s.stt.audio.every((b) => b.every((x) => x === 0))).toBe(true);
+    expect(s.stt.commits).toBe(0);
+    s.vs.setPtt(true);
+    const n = s.stt.audio.length;
+    await sleep(100);
+    expect(s.stt.audio.length).toBe(n);
   });
 
   it('a TTS failure still streams the text answer', async () => {

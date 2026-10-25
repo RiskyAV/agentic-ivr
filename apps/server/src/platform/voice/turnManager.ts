@@ -20,11 +20,17 @@ export interface VoiceConfig {
   bargeInSustainMs?: number;
   /**
    * Energy VAD on the raw mic PCM: this much sustained voice while assistant audio is in flight interrupts without
-   * waiting for a transcript (D-012's ~400 ms; Scribe partials lag speech by 1.5-2 s). 0 disables. Default 400.
+   * waiting for a transcript (Scribe partials lag speech by 1.5-2 s). 0 disables. Default 500.
    */
   bargeInVadMs?: number;
-  /** Absolute level (dBFS) a mic frame must exceed to count as voice; also at least 15 dB over the noise floor. */
+  /** Absolute level (dBFS) a mic frame must exceed to count as voice. Default -40. */
   bargeInVadDb?: number;
+  /** ...and it must also be this many dB above the adaptive noise floor. Default 15. */
+  bargeInVadMarginDb?: number;
+  /** After an energy barge-in, words must follow within this long, or it is logged as unconfirmed. Default 2500. */
+  bargeInConfirmMs?: number;
+  /** Push-to-talk: a silent frame this often while the button is up keeps the STT session alive. Default 5000. */
+  sttKeepaliveMs?: number;
   /** Added to the estimated client playback end. */
   playbackMarginMs?: number;
   /** If no playback_report arrives after a barge-in, estimate what was heard after this long. */
@@ -48,6 +54,10 @@ export interface VoiceDeps {
   /** Per-session turn rate limit; false drops the utterance with an error. */
   allowTurn?: () => boolean;
   metrics?: Pick<Metrics, 'record'>;
+  /** Event log for turns answered without the engine (voice confirm/cancel/re-read-back). Redacted by the log. */
+  log?: (ev: { type: 'user_input'; text: string; turnId: string; channel: 'voice' }) => void;
+  /** Voice input gave up for good: the owner should release this session's voice slot. */
+  onDead?: () => void;
   cfg: VoiceConfig;
 }
 
@@ -71,6 +81,9 @@ export function pcmDbfs(pcm: Buffer): number {
   return rms > 0 ? Math.max(-100, 20 * Math.log10(rms)) : -100;
 }
 export const CANCELLED_SPEECH = "Okay, I've cancelled that.";
+export const GO_AHEAD_SPEECH = 'Sorry, go ahead.';
+/** 20 ms of 16 kHz PCM16 silence. */
+const SILENT_FRAME = Buffer.alloc(640);
 
 /** Concatenated per-character alignment of an utterance, in ms from its first audio sample. */
 export function heardText(chars: string[], startsMs: number[], playedMs: number): string {
@@ -122,6 +135,10 @@ class Utterance {
   traceSent = false;
   historyEntry?: Extract<HistoryEntry, { role: 'assistant' }>;
   heard?: string;
+  /** Proposal read back by this utterance; consent is awaited only if it was the last thing said, uninterrupted. */
+  readBacks = 0;
+  readBackFor?: { proposalId: string; termsHash: string };
+  readBackAt = 0;
   private queue: Array<{ kind: 'text'; text: string } | { kind: 'flush' } | { kind: 'end' }> = [];
 
   constructor(
@@ -230,6 +247,17 @@ export class VoiceSession {
   private vadVoicedMs = 0;
   private vadGapMs = 0;
   private noiseDb = -60;
+  private unconfirmedTimer?: NodeJS.Timeout;
+  private keepalive?: NodeJS.Timeout;
+  private pendingCommit = false;
+  private gaveUp = false;
+  /**
+   * D-021 for voice: a spoken yes/no acts only on the proposal whose read-back the customer just heard in full.
+   * Cleared by any barge-in, any other utterance, voice_stop, or the proposal being resolved elsewhere.
+   */
+  private awaiting: { proposalId: string; termsHash: string } | null = null;
+  /** Proposals this session actually put in front of the customer (emitted via the engine's proposal sink). */
+  private readonly surfaced = new Map<string, ProposalView>();
 
   constructor(private readonly d: VoiceDeps) {}
 
@@ -241,6 +269,11 @@ export class VoiceSession {
   async start(): Promise<void> {
     this.d.ttsPool.prewarm();
     await this.connectStt();
+    if (this.d.cfg.ptt) {
+      // Push-to-talk sends no audio between presses; vendors close idle sessions, so send a silent frame now and then.
+      this.keepalive = setInterval(() => { if (!this.pttDown) this.stt?.send(SILENT_FRAME); }, this.d.cfg.sttKeepaliveMs ?? 5000);
+      this.keepalive.unref?.();
+    }
   }
 
   private connectStt(): Promise<void> {
@@ -255,6 +288,7 @@ export class VoiceSession {
       stt.on('close', () => { if (this.stt === stt) this.stt = undefined; });
       for (const b of this.pendingAudio.splice(0)) stt.send(b);
       this.pendingBytes = 0;
+      if (this.pendingCommit) { this.pendingCommit = false; stt.commit(); }
     })().finally(() => { this.connecting = undefined; });
     return this.connecting;
   }
@@ -271,8 +305,17 @@ export class VoiceSession {
   }
 
   private giveUpStt() {
+    if (this.gaveUp || this.stopped) return;
+    this.gaveUp = true;
     this.sttDead = true;
     this.send({ type: 'error', code: 'voice_vendor_error', message: 'Voice input is unavailable right now. You can keep typing.' });
+    this.stop();
+    this.d.onDead?.();
+  }
+
+  private ensureStt() {
+    if (this.stt || this.connecting || this.sttDead || this.stopped) return;
+    this.connectStt().catch(() => this.onSttError(new Error('stt reconnect failed')));
   }
 
   pushAudio(pcm: Buffer): void {
@@ -284,31 +327,38 @@ export class VoiceSession {
     this.pendingAudio.push(pcm);
     this.pendingBytes += pcm.length;
     while (this.pendingBytes > MAX_PENDING_AUDIO_BYTES) this.pendingBytes -= this.pendingAudio.shift()!.length;
-    if (!this.connecting) this.connectStt().catch(() => this.onSttError(new Error('stt reconnect failed')));
+    this.ensureStt();
   }
 
-  /** Energy VAD: sustained voice over an adaptive noise floor while we are talking is a barge-in. */
+  /**
+   * Energy VAD: sustained voice over an adaptive noise floor, counted only while our audio is in flight.
+   * The floor follows every frame (EMA, ~3 s up, ~0.3 s down), so steady fan or street noise is learnt and ignored.
+   */
   private detectVoice(pcm: Buffer) {
-    const needMs = this.d.cfg.bargeInVadMs ?? 400;
+    const needMs = this.d.cfg.bargeInVadMs ?? 500;
     if (needMs <= 0) return;
     const ms = pcm.length / PCM16K_BYTES_PER_MS;
     const db = pcmDbfs(pcm);
-    if (db > Math.max(this.d.cfg.bargeInVadDb ?? -40, this.noiseDb + 15)) {
+    const floor = this.noiseDb;
+    this.noiseDb = floor + (db - floor) * Math.min(1, ms / (db > floor ? 3000 : 300));
+    const u = this.cur;
+    if (!u || !u.speaking(this.now(), this.margin)) {
+      this.vadVoicedMs = 0;
+      this.vadGapMs = 0;
+      return;
+    }
+    if (db > Math.max(this.d.cfg.bargeInVadDb ?? -40, floor + (this.d.cfg.bargeInVadMarginDb ?? 15))) {
       // A short dip inside speech (between syllables or words) counts as voiced, as in any VAD with hangover.
       this.vadVoicedMs += ms + (this.vadVoicedMs > 0 ? this.vadGapMs : 0);
       this.vadGapMs = 0;
     } else {
-      this.noiseDb = Math.min(-35, Math.max(-90, this.noiseDb * 0.95 + db * 0.05));
       this.vadGapMs += ms;
       if (this.vadGapMs > VAD_HANGOVER_MS) this.vadVoicedMs = 0;
       return;
     }
     if (this.vadVoicedMs < needMs) return;
-    const u = this.cur;
-    if (u && u.speaking(this.now(), this.margin)) {
-      this.vadVoicedMs = 0;
-      this.bargeIn(u, 'vad');
-    }
+    this.vadVoicedMs = 0;
+    this.bargeIn(u, 'vad');
   }
 
   setPtt(down: boolean): void {
@@ -319,9 +369,21 @@ export class VoiceSession {
       // Pressing the button while the assistant talks is an explicit interruption.
       const u = this.cur;
       if (u && !u.closed && (u.speaking(this.now(), this.margin) || u.engineRunning)) this.bargeIn(u, 'ptt');
+      this.ensureStt();
     } else if (!down && wasDown) {
-      this.stt?.commit();
+      if (this.stt) this.stt.commit();
+      else {
+        // Released while the STT session is (re)connecting: commit as soon as it is up.
+        this.pendingCommit = true;
+        this.ensureStt();
+      }
     }
+  }
+
+  /** The proposal was confirmed, cancelled or expired elsewhere (e.g. the UI card). */
+  proposalResolved(proposalId: string): void {
+    if (this.awaiting?.proposalId === proposalId) this.awaiting = null;
+    this.surfaced.delete(proposalId);
   }
 
   onPlaybackReport(turnSeq: number, playedMs: number): void {
@@ -347,6 +409,9 @@ export class VoiceSession {
   stop(): void {
     if (this.stopped) return;
     this.stopped = true;
+    this.awaiting = null;
+    clearInterval(this.keepalive);
+    clearTimeout(this.unconfirmedTimer);
     this.stt?.close();
     this.stt = undefined;
     const u = this.cur;
@@ -377,6 +442,7 @@ export class VoiceSession {
     }
     if (speaking && !this.d.cfg.ptt && isEcho(t, u!.spokenTail)) return;
     this.send({ type: 'transcript', text: t, final: false });
+    if (realWords(t) >= 1) this.confirmBargeIn();
     if (!speaking || this.d.cfg.ptt) return;
     const trigger = bargeInTrigger(t, this.d.cfg.bargeInMinWords);
     const sustained = realWords(t) >= 1 && now - this.segmentStart >= (this.d.cfg.bargeInSustainMs ?? 400);
@@ -399,9 +465,18 @@ export class VoiceSession {
     this.send({ type: 'transcript', text: t, final: true });
     if (commitMs !== undefined) this.metric('voice_stt_commit_ms', commitMs);
 
-    const pending = this.d.actions.pending(this.d.session.id);
-    if (pending.length === 1 && isAffirmation(t)) { void this.voiceConfirm(t, pending[0]!, now); return; }
-    if (pending.length === 1 && isNegation(t)) { void this.voiceCancel(t, pending[0]!, now); return; }
+    if (!isFillerOnly(t)) this.confirmBargeIn();
+
+    const yes = isAffirmation(t);
+    if (yes || isNegation(t)) {
+      const pending = this.d.actions.pending(this.d.session.id);
+      const aw = this.awaiting;
+      const heard = aw && pending.find((p) => p.id === aw.proposalId && p.termsHash === aw.termsHash);
+      if (heard) { void (yes ? this.voiceConfirm(t, heard, now) : this.voiceCancel(t, heard, now)); return; }
+      // Not just read back in full (cut off, or something else was said since): read it again before acting on "yes".
+      const shown = pending.filter((p) => this.surfaced.has(p.id));
+      if (shown.length === 1) { void (yes ? this.reReadBack(t, shown[0]!, now) : this.voiceCancel(t, shown[0]!, now)); return; }
+    }
     if (isFillerOnly(t)) return;
     if (this.d.allowTurn && !this.d.allowTurn()) {
       this.send({ type: 'error', code: 'rate_limited', message: 'You are sending messages too quickly. Please wait a moment.' });
@@ -415,10 +490,12 @@ export class VoiceSession {
   private newUtterance(turnSeq: number, turnId: string, startedAt: number): Utterance {
     const u = new Utterance(turnSeq, turnId, startedAt, this);
     this.cur = u;
+    this.awaiting = null;
     this.recent.set(turnSeq, u);
     while (this.recent.size > 6) this.recent.delete(this.recent.keys().next().value!);
     this.send({ type: 'tts_begin', turnSeq, turnId });
-    this.d.ttsPool.take().then((tts) => u.attach(tts), (e: Error) => this.onTtsFailed(u, e));
+    if (this.stopped) u.closeHard();
+    else this.d.ttsPool.take().then((tts) => u.attach(tts), (e: Error) => this.onTtsFailed(u, e));
     return u;
   }
 
@@ -432,6 +509,12 @@ export class VoiceSession {
     if (u.closed) return;
     const now = this.now();
     u.bargedIn = true;
+    this.awaiting = null;
+    if (trigger === 'vad') {
+      clearTimeout(this.unconfirmedTimer);
+      this.unconfirmedTimer = setTimeout(() => this.unconfirmedBargeIn(), this.d.cfg.bargeInConfirmMs ?? 2500);
+      this.unconfirmedTimer.unref?.();
+    }
     u.span('barge_in', now, now, { trigger });
     const active = this.d.session.activeTurn;
     if (active && active.turnId === u.turnId) active.abort.abort();
@@ -443,6 +526,24 @@ export class VoiceSession {
     u.heardTimer = setTimeout(() => this.resolveHeard(u, estimate), this.d.cfg.heardFallbackMs ?? 1500);
     u.heardTimer.unref?.();
     this.releaseTrace(u);
+  }
+
+  /** Words arrived after an energy barge-in: it was real speech. */
+  private confirmBargeIn() {
+    clearTimeout(this.unconfirmedTimer);
+    this.unconfirmedTimer = undefined;
+  }
+
+  /** Energy cut us off but no words followed (noise, a cough, the call's audio): say so, rather than stay silent. */
+  private unconfirmedBargeIn() {
+    this.unconfirmedTimer = undefined;
+    if (this.stopped) return;
+    this.metric('voice_barge_in_unconfirmed', 1);
+    const cur = this.cur;
+    if (cur && !cur.closed) return; // something else is already being said
+    const u = this.newUtterance(++this.d.session.turnSeq, `voice-prompt-${randomUUID()}`, this.now());
+    u.say(GO_AHEAD_SPEECH, true);
+    u.finishInput();
   }
 
   private resolveHeard(u: Utterance, playedMs: number) {
@@ -487,6 +588,10 @@ export class VoiceSession {
   onTtsDone(u: Utterance) {
     if (u.ttsDone) return;
     u.ttsDone = true;
+    // The read-back was generated in full, was the last thing in this utterance, and nobody cut it off.
+    if (!u.closed && !u.ttsFailed && !u.bargedIn && this.cur === u && u.readBacks === 1 && u.readBackFor && u.sentChars === u.readBackAt) {
+      this.awaiting = u.readBackFor;
+    }
     if (!u.closed) this.send({ type: 'tts_end', turnSeq: u.turnSeq });
     if (u.heldTrace) this.releaseTrace(u);
   }
@@ -538,8 +643,12 @@ export class VoiceSession {
       },
       proposal: (v) => {
         this.send({ type: 'action_proposal', proposal: v });
+        this.surfaced.set(v.id, v);
         u.drain(false);
         u.say(readBack(v), true);
+        u.readBacks++;
+        u.readBackFor = { proposalId: v.id, termsHash: v.termsHash };
+        u.readBackAt = u.sentChars;
       },
       done: (v) => {
         this.send({ type: 'assistant_done', turnId, text: v.text, sources: v.sources, ...(v.tables && { tables: v.tables }) });
@@ -604,10 +713,29 @@ export class VoiceSession {
 
   // ------------------------------------------------------------------ voice confirm / cancel
 
+  private localTurn(kind: string, text: string): string {
+    const turnId = `voice-${kind}-${randomUUID()}`;
+    this.send({ type: 'turn_start', turnId, channel: 'voice', userText: text });
+    this.d.log?.({ type: 'user_input', text, turnId, channel: 'voice' });
+    return turnId;
+  }
+
+  /** "Just to confirm: …" — a fully heard re-read makes the next yes count. */
+  private reReadBack(text: string, p: Proposal, at: number) {
+    const view = this.surfaced.get(p.id);
+    if (!view) return;
+    this.interruptCurrent('reread');
+    const turnId = this.localTurn('reread', text);
+    const u = this.newUtterance(++this.d.session.turnSeq, turnId, at);
+    this.finishLocal(u, text, `Just to confirm: ${view.summary} Shall I go ahead?`, `Just to confirm: ${readBack(view)}`);
+    u.readBacks = 1;
+    u.readBackFor = { proposalId: p.id, termsHash: p.termsHash };
+    u.readBackAt = u.sentChars;
+  }
+
   private async voiceConfirm(text: string, p: Proposal, at: number) {
     this.interruptCurrent('confirm');
-    const turnId = `voice-confirm-${randomUUID()}`;
-    this.send({ type: 'turn_start', turnId, channel: 'voice', userText: text });
+    const turnId = this.localTurn('confirm', text);
     const u = this.newUtterance(++this.d.session.turnSeq, turnId, at);
     let outcome: ActionOutcome;
     try {
@@ -616,14 +744,14 @@ export class VoiceSession {
       console.warn('[voice] confirm failed', e);
       outcome = { status: 'failed', message: "Sorry, I couldn't complete that just now. Nothing was changed." };
     }
+    if (outcome.status !== 'failed' || !outcome.reason) this.proposalResolved(p.id);
     const { display, speech } = confirmOutcomeText(outcome);
     this.finishLocal(u, text, display, speech);
   }
 
   private async voiceCancel(text: string, p: Proposal, at: number) {
     this.interruptCurrent('cancel');
-    const turnId = `voice-cancel-${randomUUID()}`;
-    this.send({ type: 'turn_start', turnId, channel: 'voice', userText: text });
+    const turnId = this.localTurn('cancel', text);
     const u = this.newUtterance(++this.d.session.turnSeq, turnId, at);
     let outcome: ActionOutcome;
     try {
@@ -631,6 +759,7 @@ export class VoiceSession {
     } catch {
       outcome = { status: 'failed', message: "Sorry, I couldn't cancel that just now." };
     }
+    this.proposalResolved(p.id);
     const msg = outcome.status === 'cancelled' ? CANCELLED_SPEECH : outcome.message;
     this.finishLocal(u, text, msg, msg);
   }

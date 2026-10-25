@@ -163,9 +163,12 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
         return o;
       },
       allowTurn: () => ctx.turnLimiter.take(session.id),
+      log: (ev) => ctx.eventLog.append(session.id, { ...ev, at: ctx.now() }),
+      // STT gave up for good: free the voice slot (the session already sent voice_vendor_error).
+      onDead: () => { if (c.voice === v) stopVoice(c); },
       cfg: {
         bargeInMinWords: ctx.config.voice.bargeInMinWords, bargeInVadMs: ctx.config.voice.bargeInVadMs,
-        bargeInVadDb: ctx.config.voice.bargeInVadDb, fillerAfterMs: ctx.config.voice.fillerAfterMs, ptt: mode === 'ptt',
+        bargeInVadDb: ctx.config.voice.bargeInVadDb, bargeInVadMarginDb: ctx.config.voice.bargeInVadMarginDb, fillerAfterMs: ctx.config.voice.fillerAfterMs, ptt: mode === 'ptt',
       },
     });
     // Reserve the slot before the vendor handshake so concurrent starts cannot exceed the cap.
@@ -298,11 +301,14 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
       case 'confirm_action': {
         if (!str(msg.proposalId, 128) || !str(msg.termsHash, 128)) return err(c, 'bad_request', 'proposalId and termsHash are required.');
         await confirm(c, msg.proposalId, msg.termsHash);
+        c.voice?.proposalResolved(msg.proposalId);
         return;
       }
       case 'cancel_action': {
         if (!str(msg.proposalId, 128)) return err(c, 'bad_request', 'proposalId is required.');
-        return sendResult(c, msg.proposalId, await ctx.actions.cancel(session, msg.proposalId));
+        sendResult(c, msg.proposalId, await ctx.actions.cancel(session, msg.proposalId));
+        c.voice?.proposalResolved(msg.proposalId);
+        return;
       }
       case 'set_workflow': {
         const wf = typeof msg.workflowId === 'string' ? ctx.workflows.get(msg.workflowId) : undefined;

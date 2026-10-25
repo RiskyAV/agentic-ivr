@@ -462,6 +462,7 @@ describe('voice over the gateway (fake vendors)', () => {
     await c.waitFor('assistant_done', from);
     await until(() => c.binaryFrames > 0);
     expect(c.msgs.slice(from).some((m) => m.type === 'tts_begin')).toBe(true);
+    await c.waitFor('tts_end', from); // the read-back was heard in full, so a yes is consent (D-021)
 
     const from2 = c.msgs.length;
     stts[0]!.emit('committed', 'Yes, go ahead.');
@@ -487,6 +488,25 @@ describe('voice over the gateway (fake vendors)', () => {
     expect(c2.msgs.slice(f3).filter((m) => m.type === 'error')).toHaveLength(0);
     await c2.close();
     await until(() => stts[1]!.closed);
+    await c.close();
+  });
+
+  it('an STT that fails twice frees the voice slot and reports voice_vendor_error once', async () => {
+    const stts: FakeStt[] = [];
+    const voice = { stt: async () => { const x = new FakeStt(); stts.push(x); return x; }, tts: async () => new FakeTts() };
+    const app = await startApp(testConfig({ maxVoiceSessions: 1 }), { voice });
+    const { body } = await login('C1001', {}, app.base);
+    const c = await new Client(body.token, app.wsBase).ready();
+    const from = c.msgs.length;
+    c.send({ type: 'voice_start' });
+    await until(() => stts.length === 1);
+    stts[0]!.emit('error', new Error('a'));
+    await until(() => stts.length === 2);
+    stts[1]!.emit('error', new Error('b'));
+    await c.waitFor('error', from);
+    await until(() => app.h.ctx.voiceSessions() === 0);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(c.msgs.slice(from).filter((m) => m.type === 'error').map((m) => (m as { code: string }).code)).toEqual(['voice_vendor_error']);
     await c.close();
   });
 

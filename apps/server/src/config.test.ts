@@ -27,7 +27,7 @@ describe('loadConfig', () => {
 
   it('voice settings: disabled without ElevenLabs credentials, defaults and overrides', () => {
     const off = loadConfig({ LLM_PROVIDER: 'stub' });
-    expect(off.config.voice).toEqual({ ttsModel: 'eleven_flash_v2_5', sttSilenceSecs: 0.45, bargeInMinWords: 2, bargeInVadMs: 400, bargeInVadDb: -40, fillerAfterMs: 700 });
+    expect(off.config.voice).toEqual({ ttsModel: 'eleven_flash_v2_5', sttSilenceSecs: 0.45, bargeInMinWords: 2, bargeInVadMs: 500, bargeInVadDb: -40, bargeInVadMarginDb: 15, fillerAfterMs: 700 });
     expect(off.warnings.join(' ')).toMatch(/voice mode is disabled/);
     const on = loadConfig({
       LLM_PROVIDER: 'stub', ELEVENLABS_API_KEY: 'k', ELEVENLABS_VOICE_ID: 'v', STT_SILENCE_SECS: '0.3', BARGE_IN_MIN_WORDS: '3', BARGE_IN_VAD_MS: '0', FILLER_AFTER_MS: '500',
