@@ -7,11 +7,12 @@ export type ChatItem =
   | { kind: 'user'; id: string; turnId: string; text: string; channel: Channel }
   | {
       kind: 'assistant'; id: string; turnId: string; text: string; sources: Source[]; tables?: TableView[];
-      streaming: boolean; retracted?: boolean;
+      streaming: boolean; retracted?: boolean; /** The customer barged in before the whole answer was heard. */ interrupted?: boolean;
     }
   | { kind: 'proposal'; id: string; proposal: ProposalView; status: ProposalStatus; reference?: string; message?: string }
   | { kind: 'notice'; id: string; text: string; tone: 'success' | 'info' | 'error' };
 
+export type VoiceState = 'off' | 'connecting' | 'listening' | 'thinking' | 'speaking';
 export type ConnectionState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed';
 
 export interface SystemChaos { extraLatencyMs: number; failRate: number; hang: boolean }
@@ -27,7 +28,10 @@ export interface AppState {
   /** Newest first, capped. */
   traces: TurnTrace[];
   activeTurn: { turnId: string; progress?: string } | null;
-  voice: { state: 'off' | 'listening' | 'thinking' | 'speaking'; caption: string };
+  /** state and mode are driven by the voice controller; caption is the live partial transcript. */
+  voice: { state: VoiceState; caption: string; ptt: boolean };
+  /** Turns the server reported as barged-in (so a late-created assistant item is still marked). */
+  interruptedTurns: string[];
   chaos: ChaosConfig | null;
   notice: { code: string; message: string; at: number } | null;
 }
@@ -36,7 +40,7 @@ const MAX_TRACES = 20;
 
 export const initialState = (): AppState => ({
   connection: 'idle', session: null, snapshot: null, items: [], pendingProposals: [], traces: [], activeTurn: null,
-  voice: { state: 'off', caption: '' }, chaos: null, notice: null,
+  voice: { state: 'off', caption: '', ptt: false }, interruptedTurns: [], chaos: null, notice: null,
 });
 
 const assistantId = (turnId: string) => `a:${turnId}`;
@@ -85,6 +89,11 @@ function setProposal(s: AppState, id: string, patch: (p: Extract<ChatItem, { kin
 const isFinal = (st: ProposalStatus) => st === 'executed' || st === 'rejected' || st === 'failed' || st === 'expired';
 
 /** Pure reducer over server messages. */
+const VOICE_MESSAGES: Record<string, string> = {
+  voice_capacity: 'Voice is busy right now, please use text.',
+  voice_vendor_error: 'Voice ran into a problem, so we switched back to text. You can try voice again in a moment.',
+  voice_unavailable: 'Voice is not available right now, please use text.',
+};
 const VOICE_ERRORS = new Set(['voice_unavailable', 'voice_vendor_error', 'voice_capacity', 'voice_not_started']);
 
 export function reduce(s: AppState, m: ServerMsg): AppState {
@@ -115,12 +124,12 @@ export function reduce(s: AppState, m: ServerMsg): AppState {
       return s.activeTurn?.turnId === m.turnId ? { ...s, activeTurn: { turnId: m.turnId, progress: m.label } } : s;
     case 'assistant_delta':
       return upsertAssistant(s, m.turnId, (a) =>
-        a ? { ...a, text: a.retracted ? a.text : a.text + m.text } : { kind: 'assistant', id: assistantId(m.turnId), turnId: m.turnId, text: m.text, sources: [], streaming: true },
+        a ? { ...a, text: a.retracted ? a.text : a.text + m.text } : { kind: 'assistant', id: assistantId(m.turnId), turnId: m.turnId, text: m.text, sources: [], streaming: true, ...(s.interruptedTurns.includes(m.turnId) && { interrupted: true }) },
       );
     case 'assistant_done': {
       const next = upsertAssistant(s, m.turnId, (a) => {
         if (a?.retracted) return { ...a, streaming: false };
-        const base = a ?? { kind: 'assistant' as const, id: assistantId(m.turnId), turnId: m.turnId, text: '', sources: [], streaming: false };
+        const base = a ?? { kind: 'assistant' as const, id: assistantId(m.turnId), turnId: m.turnId, text: '', sources: [], streaming: false, ...(s.interruptedTurns.includes(m.turnId) && { interrupted: true }) };
         const { tables: _t, ...rest } = base;
         return { ...rest, text: m.text, sources: m.sources, ...(m.tables && m.tables.length > 0 && { tables: m.tables }), streaming: false };
       });
@@ -155,20 +164,19 @@ export function reduce(s: AppState, m: ServerMsg): AppState {
       return endTurn({ ...s, traces }, m.trace.turnId);
     }
     case 'error': {
-      const notice = { code: m.code, message: m.message, at: Date.now() };
+      const notice = { code: m.code, message: VOICE_MESSAGES[m.code] ?? m.message, at: Date.now() };
       // Errors that arrive while a turn runs mean no answer is coming.
       // Voice-side errors (vendor down, capacity) do not stop a text answer that is streaming.
       const ended = s.activeTurn && !VOICE_ERRORS.has(m.code) ? endTurn(s, s.activeTurn.turnId) : s;
       return { ...ended, notice };
     }
+    // The final transcript becomes the user bubble via turn_start, so the live caption is cleared.
     case 'transcript':
-      return { ...s, voice: { ...s.voice, caption: m.text } };
-    case 'tts_begin':
-      return { ...s, voice: { ...s.voice, state: 'speaking' } };
-    case 'tts_end':
-      return { ...s, voice: { ...s.voice, state: s.voice.state === 'speaking' ? 'listening' : s.voice.state } };
-    case 'barge_in':
-      return { ...s, voice: { ...s.voice, state: 'listening' } };
+      return { ...s, voice: { ...s.voice, caption: m.final ? '' : m.text } };
+    case 'barge_in': {
+      const items = s.items.map((i) => (i.kind === 'assistant' && i.turnId === m.turnId ? { ...i, interrupted: true } : i));
+      return { ...s, items, interruptedTurns: s.interruptedTurns.includes(m.turnId) ? s.interruptedTurns : [...s.interruptedTurns.slice(-19), m.turnId] };
+    }
     default:
       return s;
   }
@@ -202,6 +210,8 @@ interface Actions {
   expire(id: string): void;
   setConnection(c: ConnectionState): void;
   setChaos(c: ChaosConfig | null): void;
+  setVoice(patch: Partial<AppState['voice']>): void;
+  notify(code: string, message: string): void;
   clearNotice(): void;
   reset(): void;
 }
@@ -215,6 +225,8 @@ export const useStore = create<AppState & Actions>()((set) => ({
   expire: (id) => set((s) => localExpire(s, id)),
   setConnection: (connection) => set({ connection }),
   setChaos: (chaos) => set({ chaos }),
+  setVoice: (patch) => set((s) => ({ voice: { ...s.voice, ...patch } })),
+  notify: (code, message) => set({ notice: { code, message, at: Date.now() } }),
   clearNotice: () => set({ notice: null }),
   reset: () => set(initialState()),
 }));

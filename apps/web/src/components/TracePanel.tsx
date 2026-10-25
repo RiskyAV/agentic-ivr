@@ -95,7 +95,7 @@ export function TracePanel({ onClose }: { onClose?: () => void }) {
           <div className="grid grid-cols-3 gap-2">
             <Tile label="First token" stat={mm.llm_first_token} />
             <Tile label="Turn total" stat={mm.turn_total} />
-            <Tile label="Voice → audio" stat={mm.voice_first_audio} hint="Voice not enabled" />
+            <Tile label="Voice → audio" stat={mm.voice_e2e_ms ?? mm.voice_first_audio_ms} hint="Use voice to measure" />
           </div>
         </Section>
 

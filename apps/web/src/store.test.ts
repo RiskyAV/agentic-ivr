@@ -151,4 +151,23 @@ describe('store reducer', () => {
     useStore.getState().reset();
     expect(useStore.getState().items).toEqual([]);
   });
+
+  it('barge_in marks the turn interrupted, even when the assistant item is created afterwards', () => {
+    const early = run([{ type: 'assistant_delta', turnId: 't1', text: 'Your next' }, { type: 'barge_in', turnId: 't1' }]);
+    expect(early.items.find((i) => i.kind === 'assistant')).toMatchObject({ interrupted: true });
+    const late = run([{ type: 'barge_in', turnId: 't2' }, { type: 'assistant_delta', turnId: 't2', text: 'Hi' }, { type: 'assistant_done', turnId: 't2', text: 'Hi there', sources: [] }]);
+    expect(late.items.find((i) => i.kind === 'assistant')).toMatchObject({ interrupted: true, text: 'Hi there' });
+  });
+
+  it('a partial transcript is the live caption; the final one clears it (the bubble comes from turn_start)', () => {
+    expect(run([{ type: 'transcript', text: "what's my", final: false }]).voice.caption).toBe("what's my");
+    const done = run([{ type: 'transcript', text: "what's my next EMI", final: true }, { type: 'turn_start', turnId: 't1', channel: 'voice', userText: "What's my next EMI?" }]);
+    expect(done.voice.caption).toBe('');
+    expect(done.items.filter((i) => i.kind === 'user')).toHaveLength(1);
+  });
+
+  it('voice capacity and vendor errors get friendly toasts', () => {
+    expect(run([{ type: 'error', code: 'voice_capacity', message: 'x' }]).notice?.message).toBe('Voice is busy right now, please use text.');
+    expect(run([{ type: 'error', code: 'voice_vendor_error', message: 'x' }]).notice?.message).toMatch(/switched back to text/);
+  });
 });

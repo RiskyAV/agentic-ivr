@@ -2,6 +2,18 @@ import type { ClientMsg, ServerMsg } from '@app/shared';
 import { api, ApiError, wsUrl } from './api';
 import { useStore } from './store';
 
+type MsgListener = (m: ServerMsg) => void;
+const msgListeners = new Set<MsgListener>();
+const binaryListeners = new Set<(buf: ArrayBuffer) => void>();
+const closeListeners = new Set<() => void>();
+/** Hooks for the voice controller (kept here so socket.ts does not import it). */
+export const socketEvents = {
+  onMessage: (f: MsgListener) => { msgListeners.add(f); return () => { msgListeners.delete(f); }; },
+  onBinary: (f: (buf: ArrayBuffer) => void) => { binaryListeners.add(f); return () => { binaryListeners.delete(f); }; },
+  /** The socket closed or was stopped: the server-side voice session is gone with it. */
+  onClose: (f: () => void) => { closeListeners.add(f); return () => { closeListeners.delete(f); }; },
+};
+
 const REPLACED_CODE = 4001;
 const MAX_BACKOFF_MS = 10_000;
 
@@ -27,11 +39,18 @@ export class Socket {
     this.ws = null;
     ws?.close(1000, 'bye');
     useStore.getState().setConnection('closed');
+    for (const f of closeListeners) f();
   }
 
   send(m: ClientMsg): boolean {
     if (this.ws?.readyState !== WebSocket.OPEN) return false;
     this.ws.send(JSON.stringify(m));
+    return true;
+  }
+
+  sendBinary(data: Uint8Array): boolean {
+    if (this.ws?.readyState !== WebSocket.OPEN || this.ws.bufferedAmount > 1_000_000) return false;
+    this.ws.send(data);
     return true;
   }
 
@@ -44,6 +63,7 @@ export class Socket {
     const store = useStore.getState();
     store.setConnection(this.attempt === 0 ? 'connecting' : 'reconnecting');
     const ws = new WebSocket(wsUrl(this.token));
+    ws.binaryType = 'arraybuffer';
     this.ws = ws;
     let opened = false;
     ws.onopen = () => {
@@ -52,14 +72,16 @@ export class Socket {
       useStore.getState().setConnection('open');
     };
     ws.onmessage = (ev) => {
-      if (typeof ev.data !== 'string') return; // binary audio frames arrive with voice (Task 19)
+      if (typeof ev.data !== 'string') { for (const f of binaryListeners) f(ev.data as ArrayBuffer); return; }
       let msg: ServerMsg;
       try { msg = JSON.parse(ev.data) as ServerMsg; } catch { return; }
       useStore.getState().apply(msg);
+      for (const f of msgListeners) f(msg);
     };
     ws.onclose = (ev) => {
       if (this.ws !== ws || this.stopped) return;
       this.ws = null;
+      for (const f of closeListeners) f();
       if (ev.code === REPLACED_CODE) {
         useStore.getState().setConnection('closed');
         useStore.getState().apply({ type: 'error', code: 'replaced', message: 'This conversation was opened in another window.' });
@@ -104,6 +126,7 @@ export const socket = {
   disconnect(): void { current?.stop(); current = null; },
   drop(): void { current?.drop(); },
   send(m: ClientMsg): boolean { return current?.send(m) ?? false; },
+  sendBinary(d: Uint8Array): boolean { return current?.sendBinary(d) ?? false; },
 };
 
 if (import.meta.env.DEV) (window as unknown as { __northstar?: unknown }).__northstar = { dropSocket: () => socket.drop() };

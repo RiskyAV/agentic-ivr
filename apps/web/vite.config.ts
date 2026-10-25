@@ -6,6 +6,8 @@ const target = process.env.VITE_PROXY_TARGET ?? 'http://localhost:4000';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // The capture worklet must stay a real file: AudioWorklet modules are fetched by URL.
+  build: { assetsInlineLimit: (file) => (file.includes('capture-worklet') ? false : undefined) },
   server: {
     port: 5173,
     strictPort: true,

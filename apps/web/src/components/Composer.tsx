@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { ArrowUp } from 'lucide-react';
 import { useStore } from '../store';
 import { VoiceButton } from './VoiceButton';
+import { VoiceStatus } from './VoiceStatus';
 
 export function Composer({ onSend }: { onSend: (text: string) => boolean }) {
   const [text, setText] = useState('');
@@ -27,6 +28,7 @@ export function Composer({ onSend }: { onSend: (text: string) => boolean }) {
 
   return (
     <div className="border-t border-slate-200 bg-white/90 px-3 pb-[max(12px,env(safe-area-inset-bottom))] pt-3 backdrop-blur sm:px-6">
+      <VoiceStatus />
       <div className="mx-auto flex max-w-3xl items-end gap-2">
         <div className="flex min-w-0 flex-1 items-end rounded-2xl border border-slate-300 bg-white pl-4 pr-1.5 shadow-sm focus-within:border-teal-500 focus-within:ring-2 focus-within:ring-teal-500/15">
           <textarea

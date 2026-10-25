@@ -23,7 +23,7 @@ function Toast() {
     const t = setTimeout(clear, 6000);
     return () => clearTimeout(t);
   }, [notice, clear]);
-  if (!notice || notice.code === 'voice_unavailable') return null;
+  if (!notice) return null;
   return (
     <div className="pointer-events-none fixed inset-x-0 top-16 z-50 flex justify-center px-4">
       <div role="status" className="pointer-events-auto flex max-w-md items-start gap-3 rounded-xl bg-slate-900 px-4 py-3 text-sm text-white shadow-xl">

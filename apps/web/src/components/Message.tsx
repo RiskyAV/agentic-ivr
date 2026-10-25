@@ -31,6 +31,7 @@ export function AssistantMessage({ item }: { item: Item<'assistant'> }) {
           {item.retracted && (
             <p className="mt-2.5 flex items-center gap-1.5 border-t border-amber-100 pt-2 text-xs text-amber-700"><ShieldAlert className="h-3.5 w-3.5" />Earlier reply withdrawn by safety check</p>
           )}
+          {item.interrupted && <p className="mt-2 text-[11px] italic text-slate-400" data-testid="interrupted">interrupted</p>}
           {item.tables?.map((t, i) => <DataTable key={i} table={t} />)}
           {!item.streaming && <SourceChips sources={item.sources} />}
         </div>
