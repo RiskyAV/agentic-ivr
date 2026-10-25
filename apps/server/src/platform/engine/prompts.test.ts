@@ -31,6 +31,17 @@ describe('buildPrompt', () => {
     expect(a.system.slice(0, a.system.indexOf('## Customer snapshot'))).toBe(b.system.slice(0, b.system.indexOf('## Customer snapshot')));
   });
 
+  it('stable prefix carries the accuracy rules', () => {
+    const { system } = build([]);
+    const prefix = system.slice(0, system.indexOf('## Customer snapshot'));
+    expect(prefix).toMatch(/never (write|add) (a |the )?unit/i);
+    expect(prefix).toMatch(/internal reference ids/i);
+    expect(prefix).toMatch(/refer to payments by date/i);
+    expect(prefix).toMatch(/yes\/no question/i);
+    expect(prefix).toMatch(/answer the condition literally first/i);
+    expect(prefix).toMatch(/raw (code|enum)/i);
+  });
+
   it('prefixHash changes when the workflow prompt changes', () => {
     const a = build([]);
     const b = buildPrompt({ ...{ wf: { ...loanServicing, systemPrompt: 'other' } }, snapshot, entities: {}, history: [], channel: 'text', values: snapshotValues(snapshot), policySummaries: summarisePolicies(loanServicing.policyTopics) });

@@ -94,7 +94,7 @@ const getRepaymentSchedule: ToolDef<{ loanId?: string; fromDate?: string; months
 // ---------------------------------------------------------------- get_payment_history
 const getPaymentHistory: ToolDef<{ loanId?: string; months?: number; status?: 'failed' | 'success' | 'all' }> = {
   name: 'get_payment_history',
-  description: 'Past EMI payments with status. For failed payments, says whether any bounce charge levied is valid under policy.',
+  description: "Past EMI payments, newest first, keyed by ordinal alias (failed_1, failed_2, paid_1...). For failed payments: the charge levied, the charge due under policy, the refundable amount and whether it is disputable. `ref` is an internal id: never show it; pass the alias (e.g. failed_1) to propose_dispute.",
   kind: 'read',
   filler: 'Looking at your payment history.',
   schema: z.object({
@@ -114,30 +114,48 @@ const getPaymentHistory: ToolDef<{ loanId?: string; months?: number; status?: 'f
     const values: Values = { 'payments.count': count(list.length) };
     const sources: Source[] = [loanSrc(loan.loanId, loan.product)];
     let bounceClause: PolicyClause | undefined;
-    const rows = list.map((p) => {
-      let bounceChargeValid: boolean | undefined;
+    // Ordinal aliases, newest first (ties by id, descending). The dispute action resolves them in the same order.
+    const ordered = [...list].sort((x, y) => y.date.localeCompare(x.date) || y.paymentId.localeCompare(x.paymentId));
+    let nFailed = 0;
+    let nPaid = 0;
+    let totalRefundable = 0;
+    const rows = ordered.map((p) => {
+      const alias = p.status === 'failed' ? `failed_${++nFailed}` : `${p.status === 'success' ? 'paid' : 'pending'}_${++nPaid}`;
+      const keys = [`payments.${p.paymentId}`, `payments.${alias}`];
+      const put = (field: string, v: BoundValue) => keys.forEach((k) => { values[`${k}.${field}`] = v; });
+      put('amount', money(p.amount));
+      put('date', date(p.date));
+      let charge: { levied: number; due: number; refundable: number } | undefined;
       if (p.status === 'failed') {
         const rule = bounceRule(p.failureCode ?? '', ctx.today);
         const levied = p.bounceCharge ?? 0;
-        bounceChargeValid = levied === 0 ? true : rule.chargeable && levied === rule.amount;
-        values[`payments.${p.paymentId}.bounce_charge`] = money(levied);
-        values[`payments.${p.paymentId}.bounce_charge_valid`] = text(bounceChargeValid ? 'yes' : 'no');
-        values[`payments.${p.paymentId}.policy_charge`] = money(rule.amount);
+        const due = rule.chargeable ? rule.amount : 0;
+        const refundable = Math.max(levied - due, 0);
+        charge = { levied, due, refundable };
+        totalRefundable += refundable;
+        put('bounce_charge_levied', money(levied));
+        put('bounce_charge_due', money(due));
+        put('refundable', money(refundable));
+        put('disputable', text(refundable > 0 ? 'yes' : 'no'));
+        put('failure_reason', text(p.failureReason ?? 'the payment did not go through'));
         bounceClause = rule.clause;
       }
-      values[`payments.${p.paymentId}.amount`] = money(p.amount);
-      values[`payments.${p.paymentId}.date`] = date(p.date);
-      return { ...p, ...(bounceChargeValid !== undefined && { bounceChargeValid }) };
+      const { paymentId, bounceCharge: _levied, ...rest } = p;
+      return { ref: paymentId, alias, ...rest, ...(charge && {
+        bounceChargeLevied: charge.levied, bounceChargeDue: charge.due, refundable: charge.refundable, disputable: charge.refundable > 0,
+      }) };
     });
     if (bounceClause) sources.push(citeClause(ctx, g, bounceClause, await pol));
-    values['payments.failed_count'] = count(list.filter((p) => p.status === 'failed').length);
+    values['payments.failed_count'] = count(nFailed);
+    values['payments.total_refundable'] = money(totalRefundable);
     const table: TableView = {
       title: `Payments for ${loan.loanId}`,
-      columns: ['Date', 'Amount', 'Status', 'Reason', 'Bounce charge', 'Valid under policy'],
+      columns: ['Date', 'Amount', 'Status', 'Reason', 'Charge levied', 'Charge due', 'Refundable'],
       rows: rows.map((r) => [
         formatDate(r.date), formatInr(r.amount), r.status, r.failureReason ?? '',
-        r.status === 'failed' ? formatInr(r.bounceCharge ?? 0) : '',
-        r.bounceChargeValid === undefined ? '' : r.bounceChargeValid ? 'yes' : 'no',
+        r.bounceChargeLevied === undefined ? '' : formatInr(r.bounceChargeLevied),
+        r.bounceChargeDue === undefined ? '' : formatInr(r.bounceChargeDue),
+        r.refundable === undefined ? '' : formatInr(r.refundable),
       ]),
     };
     return { ok: true, data: { loanId: loan.loanId, payments: rows }, values, sources: dedupeSources(sources), tables: [table], ...g.stale };
@@ -234,6 +252,12 @@ const getServiceRequests: ToolDef<Record<string, never>> = {
 };
 
 // ---------------------------------------------------------------- explain_emi_change
+const CAUSE_TEXT = {
+  rate_reset: 'a change in your floating interest rate (repo-linked reset)',
+  tenure_change: 'a change in your loan tenure',
+  prepayment: 'a part-prepayment on your loan',
+  unknown: 'a change recorded on your loan',
+} as const;
 const explainEmiChange: ToolDef<{ loanId?: string }> = {
   name: 'explain_emi_change',
   description: 'Explains why the EMI changed: old and new EMI, the cause (rate reset, tenure change, prepayment), the rate change, and the effect of keeping the old EMI.',
@@ -260,7 +284,7 @@ const explainEmiChange: ToolDef<{ loanId?: string }> = {
       'emi_change.new_emi': money(change.newEmi),
       'emi_change.difference': money(Math.abs(change.newEmi - change.oldEmi)),
       'emi_change.direction': text(change.newEmi >= change.oldEmi ? 'increase' : 'decrease'),
-      'emi_change.cause': text(cause),
+      'emi_change.cause': text(CAUSE_TEXT[cause]),
       'emi_change.effective_date': date(change.effectiveDate),
       'emi_change.remaining_months': months(loan.remainingMonths),
     };
@@ -381,6 +405,7 @@ const checkForeclosure: ToolDef<{ loanId?: string }> = {
       'foreclosure.eligible': text(rule.eligible ? 'yes' : 'no'),
       'foreclosure.charge_pct': pct(Math.round(rule.chargePct * 100)),
       'foreclosure.as_on': date(ctx.today),
+      'foreclosure.penalty_free': text(rule.eligible && rule.chargePct === 0 ? 'yes' : 'no'),
     };
     if (rule.lockInEndsOn) values['foreclosure.lock_in_ends_on'] = date(rule.lockInEndsOn);
     const sources: Source[] = [loanSrc(loan.loanId, loan.product), citeClause(ctx, g, rule.clause, rule.clause.topic === 'foreclosure' ? await polFc : await polPre), citeClause(ctx, g, prepay.clause, await polPre)];
@@ -395,6 +420,7 @@ const checkForeclosure: ToolDef<{ loanId?: string }> = {
       values['foreclosure.charge'] = money(quote.charge);
       values['foreclosure.gst'] = money(quote.gstOnCharge);
       values['foreclosure.total'] = money(quote.total);
+      values['foreclosure.penalty_amount'] = money(quote.charge + quote.gstOnCharge);
       sources.push(calcSource(
         'foreclosureQuote', 'Foreclosure quote',
         `${formatInr(loan.outstanding)} at ${formatPct(loan.annualRateBps)} accrued since ${formatDate(loan.lastPaidDueDate ?? loan.disbursedOn)}, charge ${rule.chargePct}%`,

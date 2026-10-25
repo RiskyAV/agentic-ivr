@@ -55,14 +55,34 @@ export class PlaceholderRenderer {
 
   /** Flush anything held; an unterminated `{{...` is plain text, not an unresolved placeholder. */
   end(): string {
-    const out = this.lit(this.buf);
+    let out = this.lit(this.buf);
     this.buf = '';
+    if (this.unitPending) {
+      this.unitPending = false;
+      const rest = /^\s*months?$/i.test(this.unitBuf) ? '' : this.unitBuf;
+      this.unitBuf = '';
+      if (rest) { this.add(rest, false); out += rest; }
+    }
     return out;
   }
 
+  /** After a bound `months` value the renderer already wrote the unit; a repeated "months" is dropped. */
+  private unitPending = false;
+  private unitBuf = '';
+
   private lit(t: string): string {
+    if (this.unitPending && t) t = this.dedupeUnit(t);
     if (t) this.add(t, false);
     return t;
+  }
+
+  private dedupeUnit(t: string): string {
+    const tmp = this.unitBuf + t;
+    const m = /^\s*months?(?![A-Za-z])/i.exec(tmp);
+    if (m && m[0].length < tmp.length) { this.unitPending = false; this.unitBuf = ''; return tmp.slice(m[0].length); }
+    if (m || /^\s*(m(o(n(t(h(s)?)?)?)?)?)?$/i.test(tmp)) { this.unitBuf = tmp; return ''; }
+    this.unitPending = false; this.unitBuf = '';
+    return tmp;
   }
 
   private bind(key: string): string {
@@ -74,8 +94,13 @@ export class PlaceholderRenderer {
     } else {
       t = formatBound(v, this.channel);
     }
+    // Flush any held unit text before the new value (it was not a duplicate of the previous months value).
+    let pre = '';
+    if (this.unitPending && this.unitBuf) { pre = this.unitBuf; this.add(pre, false); }
+    this.unitBuf = '';
+    this.unitPending = v?.kind === 'months';
     this.add(t, true);
-    return t;
+    return pre + t;
   }
 
   private add(text: string, bound: boolean): void {

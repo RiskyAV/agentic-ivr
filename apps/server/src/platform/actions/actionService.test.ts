@@ -154,6 +154,19 @@ describe('ActionService', () => {
     expect(good.summary).not.toContain(charged!.paymentId);
   });
 
+  it('(g2) dispute accepts the ordinal alias, resolved against the customer\'s own failed payments', async () => {
+    const s = setup();
+    const priya = s.ctxFor('C1002');
+    const first = await okP(s.svc.propose(priya, 'dispute', { paymentId: 'failed_1', reason: 'Bank failure' }));
+    expect(first.figures['dispute.disputed_amount']).toEqual({ kind: 'money', paise: 59000 });
+    // An alias beyond the customer's own failed payments is rejected.
+    const missing = await s.svc.propose(priya, 'dispute', { paymentId: 'failed_9', reason: 'x' });
+    expect(missing.ok).toBe(false);
+    // Rahul has no failed payments, so an alias cannot reach Priya's.
+    const rahul = await s.svc.propose(s.ctxFor('C1001'), 'dispute', { paymentId: 'failed_1', reason: 'x' });
+    expect(rahul.ok).toBe(false);
+  });
+
   it('(h) response lost after the backend committed: retries are absorbed by the idempotency key, executed once', async () => {
     const s = setup();
     const inner = injectTransport(s.app);

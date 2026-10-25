@@ -24,7 +24,7 @@ describe('explain_emi_change', () => {
     const r = ok(await h.reg.run('explain_emi_change', {}, h.ctxFor('C1001')));
     expect(r.values['emi_change.old_emi']).toEqual({ kind: 'money', paise: rupees(26035) });
     expect(r.values['emi_change.new_emi']).toEqual({ kind: 'money', paise: rupees(27045) });
-    expect(r.values['emi_change.cause']).toEqual({ kind: 'text', s: 'rate_reset' });
+    expect(r.values['emi_change.cause']).toEqual({ kind: 'text', s: 'a change in your floating interest rate (repo-linked reset)' });
     expect(r.values['emi_change.difference']).toEqual({ kind: 'money', paise: rupees(1010) });
     expect(r.values['emi_change.old_rate']).toEqual({ kind: 'pct', bps: 850 });
     expect(r.values['emi_change.new_rate']).toEqual({ kind: 'pct', bps: 910 });
@@ -62,7 +62,7 @@ describe('fix round 1', () => {
     const r = ok(await h.reg.run('explain_emi_change', {}, ctx));
     expect(r.values['emi_change.old_rate']).toBeUndefined();
     expect(r.values['emi_change.new_rate']).toBeUndefined();
-    expect(r.values['emi_change.cause']).toEqual({ kind: 'text', s: 'prepayment' });
+    expect(r.values['emi_change.cause']).toEqual({ kind: 'text', s: 'a part-prepayment on your loan' });
     expect(r.values['emi_change.direction']).toEqual({ kind: 'text', s: 'decrease' });
   });
   it('get_service_requests exposes only whitelisted fields', async () => {
@@ -159,17 +159,32 @@ describe('simulate_prepayment', () => {
 });
 
 describe('get_payment_history', () => {
-  it('Priya failed payments: bounce charge validity per policy', async () => {
+  it('Priya failed payments: levied/due/refundable/disputable per ordinal alias', async () => {
     const h = harness();
     const r = ok(await h.reg.run('get_payment_history', { months: 6, status: 'failed' }, h.ctxFor('C1002')));
-    const rows = (r.data as { payments: Array<{ failureCode: string; bounceChargeValid: boolean; paymentId: string }> }).payments;
+    const rows = (r.data as { payments: Array<Record<string, unknown>> }).payments;
     expect(rows).toHaveLength(2);
-    expect(rows.find((p) => p.failureCode === 'BANK_TECHNICAL_FAILURE')!.bounceChargeValid).toBe(false);
-    expect(rows.find((p) => p.failureCode === 'INSUFFICIENT_FUNDS')!.bounceChargeValid).toBe(true);
     expect(r.values['payments.failed_count']).toEqual({ kind: 'count', n: 2 });
-    const bad = rows.find((p) => p.failureCode === 'BANK_TECHNICAL_FAILURE')!.paymentId;
-    expect(r.values[`payments.${bad}.bounce_charge_valid`]).toEqual({ kind: 'text', s: 'no' });
-    expect(r.values[`payments.${bad}.bounce_charge`]).toEqual({ kind: 'money', paise: rupees(590) });
+    const v = r.values;
+    expect(v['payments.failed_1.date']).toEqual({ kind: 'date', iso: '2026-08-05' });
+    expect(v['payments.failed_1.bounce_charge_levied']).toEqual({ kind: 'money', paise: rupees(590) });
+    expect(v['payments.failed_1.bounce_charge_due']).toEqual({ kind: 'money', paise: 0 });
+    expect(v['payments.failed_1.refundable']).toEqual({ kind: 'money', paise: rupees(590) });
+    expect(v['payments.failed_1.disputable']).toEqual({ kind: 'text', s: 'yes' });
+    expect(v['payments.failed_1.failure_reason']?.kind).toBe('text');
+    expect(v['payments.failed_2.date']).toEqual({ kind: 'date', iso: '2026-06-05' });
+    expect(v['payments.failed_2.bounce_charge_levied']).toEqual({ kind: 'money', paise: rupees(590) });
+    expect(v['payments.failed_2.bounce_charge_due']).toEqual({ kind: 'money', paise: rupees(590) });
+    expect(v['payments.failed_2.refundable']).toEqual({ kind: 'money', paise: 0 });
+    expect(v['payments.failed_2.disputable']).toEqual({ kind: 'text', s: 'no' });
+    expect(v['payments.total_refundable']).toEqual({ kind: 'money', paise: rupees(590) });
+    // Id-keyed values exist too, and the old ambiguous pair is gone.
+    const id = (rows[0] as { ref: string }).ref;
+    expect(v[`payments.${id}.refundable`]).toEqual(v['payments.failed_1.refundable']);
+    expect(Object.keys(v).some((k) => k.endsWith('.bounce_charge') || k.endsWith('.bounce_charge_valid'))).toBe(false);
+    // The model-facing data carries the id only inside `ref`.
+    expect(rows.every((x) => !('paymentId' in x))).toBe(true);
+    expect(JSON.stringify(rows).match(/PAY-/g)?.length).toBe(rows.length);
     expect(r.tables?.[0]?.rows).toHaveLength(2);
     expect(r.sources).toContainEqual(expect.objectContaining({ kind: 'clause', ref: 'BC-01 v1' }));
   });
@@ -181,6 +196,9 @@ describe('check_foreclosure', () => {
     const r = ok(await h.reg.run('check_foreclosure', {}, h.ctxFor('C1002')));
     expect(r.values['foreclosure.charge_pct']).toEqual({ kind: 'pct', bps: 400 });
     expect(r.values['foreclosure.eligible']).toEqual({ kind: 'text', s: 'yes' });
+    expect(r.values['foreclosure.penalty_free']).toEqual({ kind: 'text', s: 'no' });
+    const pa = (r.values['foreclosure.charge'] as { paise: number }).paise + (r.values['foreclosure.gst'] as { paise: number }).paise;
+    expect(r.values['foreclosure.penalty_amount']).toEqual({ kind: 'money', paise: pa });
     const v = r.values;
     const sum = ['principal', 'accrued_interest', 'charge', 'gst'].reduce((s, k) => s + (v[`foreclosure.${k}`] as { paise: number }).paise, 0);
     expect(v['foreclosure.total']).toEqual({ kind: 'money', paise: sum });

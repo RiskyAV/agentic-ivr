@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { PlaceholderRenderer } from './renderer.js';
-import { count, money, type BoundValue } from './values.js';
+import { count, money, months, type BoundValue } from './values.js';
 
 const vals: Record<string, BoundValue> = {
   'emi_change.new_emi': money(2_710_500),
   'x.n': count(7),
+  'p.saved': months(8),
+  'p.one': months(1),
 };
 const mk = (channel: 'text' | 'voice' = 'text') => new PlaceholderRenderer(() => vals, channel);
 
@@ -66,5 +68,23 @@ describe('PlaceholderRenderer', () => {
       { text: '300', bound: true },
       { text: ' ok', bound: false },
     ]);
+  });
+  it('collapses a duplicated unit word after a months value, across chunk splits', () => {
+    const whole = mk();
+    expect(whole.push('You save {{p.saved}} months of EMIs.') + whole.end()).toBe('You save 8 months of EMIs.');
+    const split = mk();
+    const out = ['You save {{p.saved}}', ' mon', 'ths', ' of EMIs.'].map((c) => split.push(c)).join('') + split.end();
+    expect(out).toBe('You save 8 months of EMIs.');
+    expect(split.segments().map((x) => x.text).join('')).toBe('You save 8 months of EMIs.');
+    const one = mk();
+    expect(one.push('{{p.one}} month.') + one.end()).toBe('1 month.');
+    const tail = mk();
+    expect(tail.push('about {{p.saved}} months') + tail.end()).toBe('about 8 months');
+  });
+  it('keeps unrelated words after a months value', () => {
+    const r = mk();
+    expect(r.push('{{p.saved}} monthly, {{p.saved}} more') + r.end()).toBe('8 months monthly, 8 months more');
+    const q = mk();
+    expect(q.push('{{p.saved}} mo') + q.end()).toBe('8 months mo');
   });
 });

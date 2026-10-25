@@ -26,6 +26,6 @@ export function formatBound(v: BoundValue, channel: Channel): string {
     case 'date': return voice ? speakDate(v.iso) : formatDate(v.iso);
     case 'months': return `${v.n} ${v.n === 1 ? 'month' : 'months'}`;
     case 'count': return String(v.n);
-    case 'text': return v.s;
+    case 'text': return /^[a-z]+(_[a-z]+)+$/.test(v.s) ? v.s.replace(/_/g, ' ') : v.s;
   }
 }

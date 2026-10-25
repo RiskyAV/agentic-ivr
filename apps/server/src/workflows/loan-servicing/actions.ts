@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { addMonths, formatDate, formatInr, parseAmount } from '@app/domain';
+import { addMonths, formatDate, formatInr, parseAmount, type Payment } from '@app/domain';
 import type { Source } from '@app/shared';
 import type { ActionHandler, ValidateResult } from '../../platform/actions/types.js';
 import { date, money, text, type BoundValue } from '../../platform/grounding/values.js';
@@ -92,24 +92,39 @@ const prepayment: ActionHandler<PrepayP> = {
 // ---------------------------------------------------------------- dispute
 type DisputeP = { paymentId: string; reason: string };
 
+type Resolved = { ok: true; pay: Payment } | { ok: false; reason: string };
+
+/** Resolves an ordinal alias (`failed_1`, newest first, as get_payment_history keys them) or a real payment id against the customer's own failed payments. */
+async function resolveFailedPayment(ctx: ToolContext, ref: string): Promise<Resolved> {
+  const cc = { signal: ctx.signal, observer: ctx.tracer.observer };
+  const loans = await ctx.connectors.lms.getLoans(ctx.customerId, cc);
+  if (!loans.ok) return { ok: false, reason: 'Your loans could not be retrieved right now.' };
+  const lists = await Promise.all(loans.data.map((l) => ctx.connectors.payments.list(l.loanId, { status: 'failed' }, cc)));
+  if (lists.some((l) => !l.ok)) return { ok: false, reason: 'Your payment history could not be retrieved right now.' };
+  const failed = lists.flatMap((l) => (l.ok ? l.data : []))
+    .filter((x) => x.status === 'failed')
+    .sort((x, y) => y.date.localeCompare(x.date) || y.paymentId.localeCompare(x.paymentId));
+  const alias = /^failed_(\d+)$/.exec(ref.trim());
+  const pay = alias ? failed[Number(alias[1]) - 1] : failed.find((x) => x.paymentId === ref);
+  if (!pay) return { ok: false, reason: 'I could not find that failed payment in your account.' };
+  return { ok: true, pay };
+}
+
 const dispute: ActionHandler<DisputeP> = {
   type: 'dispute',
   title: 'Dispute a bounce charge',
   description:
-    'Proposes a dispute of a bounce charge levied on one of the customer\'s failed payments. It does NOT file anything: the customer must confirm. Use the payment id from get_payment_history.',
+    'Proposes a dispute of a bounce charge levied on one of the customer\'s failed payments. It does NOT file anything: the customer must confirm. Pass the payment alias from get_payment_history (failed_1, failed_2, ...). Only dispute a payment whose disputable value is yes.',
   schema: z.object({
-    paymentId: z.string().min(1).describe('The payment id from the payment history.'),
+    paymentId: z.string().min(1).describe('The payment alias from the payment history, for example "failed_1".'),
     reason: z.string().trim().min(1).max(300).describe('Why the charge should be reversed, in the customer\'s words (max 300 characters).'),
   }),
   labels: { 'dispute.disputed_amount': 'Charge disputed' },
   async validate(ctx, p): Promise<ValidateResult> {
-    const cc = { signal: ctx.signal, observer: ctx.tracer.observer };
-    const loans = await ctx.connectors.lms.getLoans(ctx.customerId, cc);
-    if (!loans.ok) return { ok: false, reason: 'Your loans could not be retrieved right now.' };
-    const lists = await Promise.all(loans.data.map((l) => ctx.connectors.payments.list(l.loanId, { status: 'failed' }, cc)));
-    if (lists.some((l) => !l.ok)) return { ok: false, reason: 'Your payment history could not be retrieved right now.' };
-    const pay = lists.flatMap((l) => (l.ok ? l.data : [])).find((x) => x.paymentId === p.paymentId);
-    if (!pay || !pay.bounceCharge) return { ok: false, reason: 'I could not find a bounce charge on that payment in your account.' };
+    const r = await resolveFailedPayment(ctx, p.paymentId);
+    if (!r.ok) return r;
+    const pay = r.pay;
+    if (!pay.bounceCharge) return { ok: false, reason: 'I could not find a bounce charge on that payment in your account.' };
     const sources: Source[] = [recordSource('payments', pay.paymentId, `Failed payment of ${formatInr(pay.amount)} on ${formatDate(pay.date)}`)];
     return {
       ok: true, sources,
@@ -117,8 +132,11 @@ const dispute: ActionHandler<DisputeP> = {
       summary: `Dispute the bounce charge of ${formatInr(pay.bounceCharge)} on your failed EMI of ${formatInr(pay.amount)} dated ${formatDate(pay.date)} (loan ${pay.loanId}).`,
     };
   },
-  execute: (ctx, p, idemKey) =>
-    createRequest(ctx, 'dispute', { paymentId: p.paymentId, reason: p.reason }, idemKey, 'Your dispute has been raised and will be reviewed.'),
+  async execute(ctx, p, idemKey) {
+    const r = await resolveFailedPayment(ctx, p.paymentId);
+    const paymentId = r.ok ? r.pay.paymentId : p.paymentId;
+    return createRequest(ctx, 'dispute', { paymentId, reason: p.reason }, idemKey, 'Your dispute has been raised and will be reviewed.');
+  },
 };
 
 // ---------------------------------------------------------------- statement
