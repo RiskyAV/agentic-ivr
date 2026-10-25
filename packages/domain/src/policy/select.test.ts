@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { rupees } from '../format/inr.js';
 import {
-  CLAUSES, bounceRule, foreclosureRule, penalRule, prepaymentRule, ptpRule, selectClause,
+  CLAUSES, getClause, bounceRule, foreclosureRule, penalRule, prepaymentRule, ptpRule, selectClause,
 } from './select.js';
 
 const ON = '2026-10-25';
@@ -65,9 +65,22 @@ describe('policy clauses', () => {
     expect(p.maxDaysAhead).toBe(7);
     expect(p.maxActive).toBe(1);
   });
+  it('old fixed loan sanctioned 2020-01-01 resolves to PRE-02 v1 at 2%', () => {
+    const r = prepaymentRule({ ...base, sanctionDate: '2020-01-01' }, ON);
+    expect(r.clause.id).toBe('PRE-02');
+    expect(r.clause.version).toBe(1);
+    expect(r.chargePct).toBe(2);
+    expect(foreclosureRule({ ...base, sanctionDate: '2020-01-01' }, ON).eligible).toBe(true);
+  });
+  it('getClause looks up by id and optional version', () => {
+    expect(getClause('PRE-02')?.version).toBe(2);
+    expect(getClause('PRE-02', 1)?.version).toBe(1);
+    expect(getClause('NOPE')).toBeUndefined();
+    expect(getClause('PRE-02', 9)).toBeUndefined();
+  });
   it('throws when no clause matches', () => {
     expect(() => selectClause('prepayment', { ...base, rateType: 'floating', borrower: 'business' }, ON)).toThrow();
-    expect(() => selectClause('prepayment', { ...base, sanctionDate: '2020-01-01' }, ON)).toThrow();
+    expect(() => selectClause('prepayment', { ...base, rateType: 'floating', borrower: 'business' }, ON)).toThrow();
   });
   it('every clause has readable text and unique id+version', () => {
     const keys = CLAUSES.map((c) => `${c.id}@${c.version}`);

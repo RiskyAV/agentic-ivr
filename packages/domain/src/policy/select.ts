@@ -84,3 +84,10 @@ export function ptpRule(onDate: string): { maxDaysAhead: number; maxActive: numb
   const clause = selectGeneral('promise_to_pay', onDate);
   return { maxDaysAhead: param(clause, 'maxDaysAhead'), maxActive: param(clause, 'maxActive'), clause };
 }
+
+/** Direct lookup by id; latest version when `version` is omitted. */
+export function getClause(id: string, version?: number): PolicyClause | undefined {
+  return CLAUSES
+    .filter((c) => c.id === id && (version === undefined || c.version === version))
+    .sort((a, b) => b.version - a.version)[0];
+}

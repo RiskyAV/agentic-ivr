@@ -22,7 +22,7 @@ export interface PolicyClause {
   lists?: Record<string, string[]>;
 }
 
-const FROM = '2024-01-01';
+const FROM = '2000-01-01';
 const V2 = '2026-04-01';
 
 export const CLAUSES: PolicyClause[] = [
