@@ -66,7 +66,11 @@ export interface EngineDeps {
 export const HIGH_DEMAND_MESSAGE = "We're seeing very high demand right now. Please try again in a moment.";
 export const BLOCKED_FALLBACK = "I'm sorry, I can't help with that. Could you rephrase?";
 export const DEGRADED_FALLBACK = "I'm still checking some of that — shall I raise a ticket so we can follow up?";
-export const ERROR_FALLBACK = "Sorry, I couldn't put an answer together just now. Could you ask again?";
+export const ERROR_FALLBACK = "Sorry, something went wrong on my side. Could you ask again, or shall I raise a ticket for you?";
+export const WITHHELD_INPUT = '[message withheld by safety check]';
+export const PROPOSAL_DROPPED_NOTE = "(I couldn't finalise that request just now — please ask again to set it up.)";
+/** Bounded wait for a guard verdict when a turn ends early (abort or error), before its input is stored in history. */
+const EARLY_GUARD_WAIT_MS = 800;
 
 export const defaultRefusal: RefusalFn = (_category, strikes) =>
   strikes >= 3
@@ -181,9 +185,12 @@ export class Engine {
     const budget = new AbortController();
     const budgetTimer = setTimeout(() => budget.abort(), Math.max(0, cfg.turnBudgetMs));
     const roundSignal = AbortSignal.any([signal, budget.signal]);
+    // Not tied to the turn signal: an aborted turn still needs the verdict before its input enters history.
     const guardCtl = new AbortController();
-    const stopGuard = () => guardCtl.abort();
-    signal.addEventListener('abort', stopGuard, { once: true });
+    const entitiesBefore = structuredClone(session.entities);
+    let guardP: Promise<GuardVerdict | null> | undefined;
+    let guardT0 = performance.now();
+    let verdict: GuardVerdict | undefined;
 
     const values: Record<string, BoundValue> = {};
     const sources: Source[] = [];
@@ -211,7 +218,35 @@ export class Engine {
       emit(/[.!?]\s*$/.test(shown) ? `${trimmed}${note}` : `…${trimmed || ' '}${note}`);
     };
     const cancelHeld = async () => {
-      for (const p of held.splice(0)) await actions.cancel(session, p.id);
+      for (const p of held.splice(0)) {
+        await actions.cancel(session, p.id).catch(() => tracer.mark('proposal_cancel_failed'));
+      }
+    };
+    const recordVerdict = (v: GuardVerdict) => {
+      verdict = v;
+      tracer.guard = { verdict: v.by === 'timeout' ? 'timeout' : v.verdict, ...(v.category && { category: v.category }), ms: v.ms };
+      log({ type: 'guard', verdict: v.verdict, by: v.by, ms: v.ms, ...(v.category && { category: v.category }) });
+      if (v.verdict === 'block') session.guardStrikes++;
+    };
+    /** Waits (bounded) for the verdict if none is recorded yet; a missing guard verdict counts as allow. */
+    const settleVerdict = async (waitMs: number, abortable: boolean) => {
+      if (verdict || !this.deps.guard) return;
+      if (!guardP) return; // the turn ended before the guard started: nothing was screened, and nothing ran either
+      const v = await Promise.race([guardP, sleep(waitMs), ...(abortable ? [onAbort(signal)] : [])]);
+      if (v === 'aborted') return;
+      recordVerdict(v && v !== 'timeout' ? v : { verdict: 'allow', by: 'timeout', ms: Math.round(performance.now() - guardT0) });
+    };
+    /**
+     * Commits the turn to history. A blocked input is never replayed to the LLM (two-step bypass): the user entry is
+     * withheld, the turn's tool entries are dropped and its entity changes are rolled back.
+     */
+    const commitHistory = (assistant?: HistoryEntry) => {
+      if (verdict?.verdict === 'block') {
+        session.entities = structuredClone(entitiesBefore);
+        session.history.push({ role: 'user', text: WITHHELD_INPUT, channel }, ...(assistant ? [assistant] : []));
+        return;
+      }
+      session.history.push({ role: 'user', text: input.text, channel }, ...toolEntries, ...(assistant ? [assistant] : []));
     };
     const updateEntities = (name: string, r: ToolResult) => {
       session.entities.lastTopic = name;
@@ -222,8 +257,8 @@ export class Engine {
     const finishAborted = async () => {
       finished = true;
       await cancelHeld();
-      session.history.push({ role: 'user', text: input.text, channel }, ...toolEntries);
-      if (shown) session.history.push({ role: 'assistant', text: shown, interruptedAt: new Date().toISOString() });
+      await settleVerdict(EARLY_GUARD_WAIT_MS, false);
+      commitHistory(shown && verdict?.verdict !== 'block' ? { role: 'assistant', text: shown, interruptedAt: new Date().toISOString() } : undefined);
       tracer.setMetric('turn_total', Math.round(elapsed()));
       log({ type: 'timing', metrics: { turn_total: Math.round(elapsed()), aborted: 1 } });
       sink.trace(tracer.toTrace());
@@ -245,8 +280,8 @@ export class Engine {
       Object.assign(values, snapshotValues(snapshot), entityValues(session.entities));
 
       // 1. Guard runs in parallel with the whole turn.
-      const guardT0 = performance.now();
-      const guardP: Promise<GuardVerdict | null> | undefined = this.deps.guard
+      guardT0 = performance.now();
+      guardP = this.deps.guard
         ?.check(
           input.text,
           { customerName: snapshot.customer?.name ?? '', otherCustomerNames: this.deps.otherCustomerNames?.(session.customerId) ?? [], strikes: session.guardStrikes },
@@ -331,42 +366,34 @@ export class Engine {
       }
 
       // 6. Guard verdict gates proposals and can retract the answer.
-      let verdict: GuardVerdict | undefined;
-      if (guardP) {
-        const wait = Math.min(cfg.guardWaitMs, Math.max(remaining(), 250));
-        const v = await Promise.race([guardP, sleep(wait), onAbort(signal)]);
-        if (v === 'aborted' || signal.aborted) return await finishAborted();
-        verdict = v && v !== 'timeout' ? v : { verdict: 'allow', by: 'timeout', ms: Math.round(performance.now() - guardT0) };
-        tracer.guard = { verdict: verdict.by === 'timeout' ? 'timeout' : verdict.verdict, ...(verdict.category && { category: verdict.category }), ms: verdict.ms };
-        log({ type: 'guard', verdict: verdict.verdict, by: verdict.by, ms: verdict.ms, ...(verdict.category && { category: verdict.category }) });
-      }
+      await settleVerdict(Math.min(cfg.guardWaitMs, Math.max(remaining(), 250)), true);
+      if (signal.aborted) return await finishAborted();
 
       let finalText = shown;
       let finalSources = dedupeSources(sources);
       let finalTables = tables;
-      if (verdict?.verdict === 'block') {
-        session.guardStrikes++;
+      if (verdict?.verdict === 'block' || llmBlocked) {
         status = 'blocked';
         await cancelHeld();
-        finalText = (this.deps.refusal ?? defaultRefusal)(verdict.category, session.guardStrikes);
-        finalSources = [];
-        finalTables = [];
-        sink.retract(finalText);
-      } else if (llmBlocked) {
-        status = 'blocked';
-        await cancelHeld();
-        finalText = BLOCKED_FALLBACK;
+        if (signal.aborted) return await finishAborted();
+        finalText = verdict?.verdict === 'block' ? (this.deps.refusal ?? defaultRefusal)(verdict.category, session.guardStrikes) : BLOCKED_FALLBACK;
         finalSources = [];
         finalTables = [];
         sink.retract(finalText);
       } else {
-        if (verdict?.by === 'timeout') await cancelHeld(); // no verdict: answer stands, but nothing actionable is offered
+        if (verdict?.by === 'timeout' && held.length > 0) {
+          // No verdict: the answer stands, but nothing actionable is offered — and the customer is told so.
+          await cancelHeld();
+          if (signal.aborted) return await finishAborted();
+          appendNote(PROPOSAL_DROPPED_NOTE);
+        }
         if (!shown && held.length === 0) {
           status = 'degraded';
           emit(ERROR_FALLBACK);
         }
         finalText = shown;
         for (const p of held.splice(0)) {
+          if (signal.aborted) return await finishAborted();
           if (p.status !== 'pending') continue;
           sink.proposal(actions.toView(p));
           log({ type: 'proposal', proposalId: p.id, actionType: p.type, termsHash: p.termsHash });
@@ -381,7 +408,7 @@ export class Engine {
       tracer.setMetric('unresolved', renderer.unresolved.length);
       finished = true;
       sink.done({ text: finalText, sources: finalSources, ...(finalTables.length > 0 && { tables: finalTables }) });
-      session.history.push({ role: 'user', text: input.text, channel }, ...toolEntries, { role: 'assistant', text: finalText });
+      commitHistory({ role: 'assistant', text: finalText });
 
       const total = Math.round(elapsed());
       metrics.record('turn_total', total);
@@ -393,10 +420,33 @@ export class Engine {
       log({ type: 'timing', metrics: tracer.toTrace().metrics });
       sink.trace(tracer.toTrace());
       return { status };
+    } catch (e) {
+      // Unexpected failure (bug, registry/prompt error, throwing sink): end the turn honestly, never silently.
+      tracer.mark('turn_error');
+      if (signal.aborted) return await finishAborted();
+      finished = true;
+      await cancelHeld();
+      await settleVerdict(EARLY_GUARD_WAIT_MS, true);
+      if (signal.aborted) return await finishAborted();
+      const blocked = verdict?.verdict === 'block';
+      const text = blocked ? (this.deps.refusal ?? defaultRefusal)(verdict!.category, session.guardStrikes) : null;
+      try {
+        if (text) sink.retract(text);
+        else appendNote(ERROR_FALLBACK);
+        const finalText = text ?? shown;
+        sink.done({ text: finalText, sources: [] });
+        commitHistory({ role: 'assistant', text: finalText });
+        log({ type: 'assistant_final', text: finalText, sources: [], unverified: [], status: blocked ? 'blocked' : 'degraded', error: e instanceof Error ? e.message : String(e) });
+        tracer.setMetric('turn_total', Math.round(elapsed()));
+        metrics.record('turn_total', Math.round(elapsed()));
+        sink.trace(tracer.toTrace());
+      } catch {
+        /* the sink itself is broken; nothing more we can tell the customer */
+      }
+      return { status: blocked ? 'blocked' : 'degraded' };
     } finally {
       finished = true;
       clearTimeout(budgetTimer);
-      signal.removeEventListener('abort', stopGuard);
       guardCtl.abort();
       if (held.length > 0) await cancelHeld();
     }
@@ -438,7 +488,10 @@ export class Engine {
       // In-flight backend calls are not cancelled on barge-in (reads land in the client cache); only on timeout.
       const run = tools.run(c.name, c.args, { ...t.ctxBase, signal: ctl.signal }).then((r) => {
         const pid = proposalOf(r);
-        if (pid && (lost || t.finishedRef())) void actions.cancel(session, pid); // late proposal nobody will see
+        if (pid && (lost || t.finishedRef())) {
+          // A late proposal nobody will see.
+          actions.cancel(session, pid).catch(() => t.ctxBase.tracer.mark('late_proposal_cancel_failed'));
+        }
         return r;
       });
       const winner = await Promise.race([run, sleep(timeoutMs), onAbort(t.signal)]);
