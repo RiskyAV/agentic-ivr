@@ -139,6 +139,9 @@ class Utterance {
   readBacks = 0;
   readBackFor?: { proposalId: string; termsHash: string };
   readBackAt = 0;
+  /** The read-back was generated in full; consent is armed when its playback ends. */
+  readBackGenerated = false;
+  armTimer?: NodeJS.Timeout;
   private queue: Array<{ kind: 'text'; text: string } | { kind: 'flush' } | { kind: 'end' }> = [];
 
   constructor(
@@ -256,6 +259,11 @@ export class VoiceSession {
    * Cleared by any barge-in, any other utterance, voice_stop, or the proposal being resolved elsewhere.
    */
   private awaiting: { proposalId: string; termsHash: string } | null = null;
+  /** When `awaiting` was armed (end of read-back playback). Speech that began before this is not an answer to it. */
+  private armedAt = 0;
+  /** Start of the latest run of mic voice energy, and when that run was last voiced. */
+  private voiceRunStartAt?: number;
+  private voiceLastAt?: number;
   /** Proposals this session actually put in front of the customer (emitted via the engine's proposal sink). */
   private readonly surfaced = new Map<string, ProposalView>();
 
@@ -341,13 +349,19 @@ export class VoiceSession {
     const db = pcmDbfs(pcm);
     const floor = this.noiseDb;
     this.noiseDb = floor + (db - floor) * Math.min(1, ms / (db > floor ? 3000 : 300));
+    const now = this.now();
+    const voiced = db > Math.max(this.d.cfg.bargeInVadDb ?? -40, floor + (this.d.cfg.bargeInVadMarginDb ?? 15));
+    if (voiced) {
+      if (this.voiceLastAt === undefined || now - this.voiceLastAt > VAD_HANGOVER_MS) this.voiceRunStartAt = now - ms;
+      this.voiceLastAt = now;
+    }
     const u = this.cur;
-    if (!u || !u.speaking(this.now(), this.margin)) {
+    if (!u || !u.speaking(now, this.margin)) {
       this.vadVoicedMs = 0;
       this.vadGapMs = 0;
       return;
     }
-    if (db > Math.max(this.d.cfg.bargeInVadDb ?? -40, floor + (this.d.cfg.bargeInVadMarginDb ?? 15))) {
+    if (voiced) {
       // A short dip inside speech (between syllables or words) counts as voiced, as in any VAD with hangover.
       this.vadVoicedMs += ms + (this.vadVoicedMs > 0 ? this.vadGapMs : 0);
       this.vadGapMs = 0;
@@ -382,15 +396,35 @@ export class VoiceSession {
 
   /** The proposal was confirmed, cancelled or expired elsewhere (e.g. the UI card). */
   proposalResolved(proposalId: string): void {
-    if (this.awaiting?.proposalId === proposalId) this.awaiting = null;
+    if (this.awaiting?.proposalId === proposalId) this.clearAwaiting();
     this.surfaced.delete(proposalId);
+  }
+
+  /** Something else happened in the conversation (typed turn, opener, workflow switch): a spoken yes is no longer consent. */
+  clearAwaiting(): void {
+    this.awaiting = null;
+    for (const u of this.recent.values()) {
+      u.readBackFor = undefined;
+      clearTimeout(u.armTimer);
+    }
+  }
+
+  /** Playback of a fully generated, uninterrupted read-back has ended: now a spoken yes is an answer to it. */
+  private armAwaiting(u: Utterance) {
+    clearTimeout(u.armTimer);
+    if (this.stopped || this.cur !== u || u.bargedIn || u.closed || !u.readBackGenerated || !u.readBackFor || this.awaiting) return;
+    this.awaiting = u.readBackFor;
+    this.armedAt = this.now();
   }
 
   onPlaybackReport(turnSeq: number, playedMs: number): void {
     const u = this.recent.get(turnSeq);
     if (!u || !Number.isFinite(playedMs)) return;
     if (u.bargedIn) { this.resolveHeard(u, playedMs); return; }
-    if (u.ttsDone && playedMs >= u.audioMs() - 100) u.playbackComplete = true;
+    if (u.ttsDone && playedMs >= u.audioMs() - 100) {
+      u.playbackComplete = true;
+      this.armAwaiting(u);
+    }
   }
 
   onClientMark(turnId: string, mark: 'speech_end' | 'first_audio_played', t: number): void {
@@ -409,7 +443,7 @@ export class VoiceSession {
   stop(): void {
     if (this.stopped) return;
     this.stopped = true;
-    this.awaiting = null;
+    this.clearAwaiting();
     clearInterval(this.keepalive);
     clearTimeout(this.unconfirmedTimer);
     this.stt?.close();
@@ -453,6 +487,9 @@ export class VoiceSession {
     const now = this.now();
     const t = text.trim();
     const duringSpeech = this.segmentDuringSpeech;
+    // When this utterance's speech began: the first partial or the onset of recent mic voice, whichever is earlier.
+    const voiceStart = this.voiceLastAt !== undefined && now - this.voiceLastAt < 3000 ? this.voiceRunStartAt : undefined;
+    const speechStart = Math.min(this.segmentStart ?? now, voiceStart ?? now);
     const commitMs = this.lastPartialAt !== undefined ? now - this.lastPartialAt : undefined;
     this.segmentStart = undefined;
     this.segmentDuringSpeech = false;
@@ -471,11 +508,15 @@ export class VoiceSession {
     if (yes || isNegation(t)) {
       const pending = this.d.actions.pending(this.d.session.id);
       const aw = this.awaiting;
-      const heard = aw && pending.find((p) => p.id === aw.proposalId && p.termsHash === aw.termsHash);
+      // A yes counts only if the customer started saying it after the read-back finished playing.
+      const heard = aw && speechStart >= this.armedAt && pending.find((p) => p.id === aw.proposalId && p.termsHash === aw.termsHash);
       if (heard) { void (yes ? this.voiceConfirm(t, heard, now) : this.voiceCancel(t, heard, now)); return; }
       // Not just read back in full (cut off, or something else was said since): read it again before acting on "yes".
       const shown = pending.filter((p) => this.surfaced.has(p.id));
-      if (shown.length === 1) { void (yes ? this.reReadBack(t, shown[0]!, now) : this.voiceCancel(t, shown[0]!, now)); return; }
+      if (shown.length === 1) {
+        if (!yes) { void this.voiceCancel(t, shown[0]!, now); return; }
+        if (this.reReadBack(t, shown[0]!, now)) return;
+      }
     }
     if (isFillerOnly(t)) return;
     if (this.d.allowTurn && !this.d.allowTurn()) {
@@ -490,7 +531,7 @@ export class VoiceSession {
   private newUtterance(turnSeq: number, turnId: string, startedAt: number): Utterance {
     const u = new Utterance(turnSeq, turnId, startedAt, this);
     this.cur = u;
-    this.awaiting = null;
+    this.clearAwaiting();
     this.recent.set(turnSeq, u);
     while (this.recent.size > 6) this.recent.delete(this.recent.keys().next().value!);
     this.send({ type: 'tts_begin', turnSeq, turnId });
@@ -509,7 +550,7 @@ export class VoiceSession {
     if (u.closed) return;
     const now = this.now();
     u.bargedIn = true;
-    this.awaiting = null;
+    this.clearAwaiting();
     if (trigger === 'vad') {
       clearTimeout(this.unconfirmedTimer);
       this.unconfirmedTimer = setTimeout(() => this.unconfirmedBargeIn(), this.d.cfg.bargeInConfirmMs ?? 2500);
@@ -588,9 +629,15 @@ export class VoiceSession {
   onTtsDone(u: Utterance) {
     if (u.ttsDone) return;
     u.ttsDone = true;
-    // The read-back was generated in full, was the last thing in this utterance, and nobody cut it off.
+    // The read-back was generated in full and was the last thing in this utterance: arm consent when its playback
+    // ends (client playback_report, or the estimate), unless it is cut off first.
     if (!u.closed && !u.ttsFailed && !u.bargedIn && this.cur === u && u.readBacks === 1 && u.readBackFor && u.sentChars === u.readBackAt) {
-      this.awaiting = u.readBackFor;
+      u.readBackGenerated = true;
+      if (u.playbackComplete) this.armAwaiting(u);
+      else {
+        u.armTimer = setTimeout(() => this.armAwaiting(u), Math.max(0, u.playbackEndsAt(this.margin) - this.now()));
+        u.armTimer.unref?.();
+      }
     }
     if (!u.closed) this.send({ type: 'tts_end', turnSeq: u.turnSeq });
     if (u.heldTrace) this.releaseTrace(u);
@@ -720,17 +767,18 @@ export class VoiceSession {
     return turnId;
   }
 
-  /** "Just to confirm: …" — a fully heard re-read makes the next yes count. */
-  private reReadBack(text: string, p: Proposal, at: number) {
+  /** "Just to confirm: …" — a fully heard re-read makes the next yes count. False if the terms no longer match. */
+  private reReadBack(text: string, p: Proposal, at: number): boolean {
     const view = this.surfaced.get(p.id);
-    if (!view) return;
+    if (!view || view.termsHash !== p.termsHash) return false;
     this.interruptCurrent('reread');
     const turnId = this.localTurn('reread', text);
     const u = this.newUtterance(++this.d.session.turnSeq, turnId, at);
     this.finishLocal(u, text, `Just to confirm: ${view.summary} Shall I go ahead?`, `Just to confirm: ${readBack(view)}`);
     u.readBacks = 1;
-    u.readBackFor = { proposalId: p.id, termsHash: p.termsHash };
+    u.readBackFor = { proposalId: view.id, termsHash: view.termsHash };
     u.readBackAt = u.sentChars;
+    return true;
   }
 
   private async voiceConfirm(text: string, p: Proposal, at: number) {

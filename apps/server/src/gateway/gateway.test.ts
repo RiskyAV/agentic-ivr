@@ -462,7 +462,9 @@ describe('voice over the gateway (fake vendors)', () => {
     await c.waitFor('assistant_done', from);
     await until(() => c.binaryFrames > 0);
     expect(c.msgs.slice(from).some((m) => m.type === 'tts_begin')).toBe(true);
-    await c.waitFor('tts_end', from); // the read-back was heard in full, so a yes is consent (D-021)
+    const end = await c.waitFor('tts_end', from);
+    c.send({ type: 'playback_report', turnSeq: end.turnSeq, playedMs: 600_000 }); // played to the end: a yes is consent (D-021)
+    await new Promise((r) => setTimeout(r, 50));
 
     const from2 = c.msgs.length;
     stts[0]!.emit('committed', 'Yes, go ahead.');
@@ -488,6 +490,32 @@ describe('voice over the gateway (fake vendors)', () => {
     expect(c2.msgs.slice(f3).filter((m) => m.type === 'error')).toHaveLength(0);
     await c2.close();
     await until(() => stts[1]!.closed);
+    await c.close();
+  });
+
+  it('a typed message after the read-back means a spoken yes is not consent', async () => {
+    const stts: FakeStt[] = [];
+    const voice = { stt: async () => { const x = new FakeStt(); stts.push(x); return x; }, tts: async () => new FakeTts() };
+    const app = await startApp(testConfig({ maxVoiceSessions: 1 }), { voice });
+    const { body } = await login('C1001', {}, app.base);
+    const c = await new Client(body.token, app.wsBase).ready();
+    c.send({ type: 'voice_start' });
+    await until(() => stts.length === 1);
+    const from = c.msgs.length;
+    stts[0]!.emit('committed', 'please prepay 50k');
+    const prop = await c.waitFor('action_proposal', from);
+    const end = await c.waitFor('tts_end', from);
+    c.send({ type: 'playback_report', turnSeq: end.turnSeq, playedMs: 600_000 });
+    await new Promise((r) => setTimeout(r, 50));
+    const from2 = c.msgs.length;
+    c.send({ type: 'user_text', turnId: 'typed1', text: 'what is my interest rate' });
+    await c.waitFor('assistant_done', from2);
+    const from3 = c.msgs.length;
+    stts[0]!.emit('committed', 'yes');
+    const done = await c.waitFor('assistant_done', from3);
+    expect(done.text).toContain('Just to confirm');
+    expect(c.msgs.slice(from3).some((m) => m.type === 'action_result')).toBe(false);
+    expect(app.h.ctx.actions.get(app.h.ctx.sessions.get(body.sessionId)!, prop.proposal.id)?.status).toBe('pending');
     await c.close();
   });
 

@@ -252,6 +252,7 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
   }
 
   async function runOpener(c: Conn) {
+    c.voice?.clearAwaiting();
     const turnId = `opener-${randomUUID()}`;
     await ctx.engine.opener(c.session, sinkFor(c, turnId), 'text');
   }
@@ -290,6 +291,7 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
         if (msg.turnId !== undefined && !str(msg.turnId, 64)) return err(c, 'bad_request', 'Invalid turnId.');
         if (!ctx.turnLimiter.take(session.id)) return err(c, 'rate_limited', 'You are sending messages too quickly. Please wait a moment.');
         const turnId = msg.turnId ?? randomUUID();
+        c.voice?.clearAwaiting(); // a typed turn moves the conversation on: a later spoken yes is not consent (D-021)
         send(c, { type: 'turn_start', turnId, channel: 'text', userText: msg.text });
         // Not awaited: the socket must keep accepting messages (barge-in, confirm) while a turn runs.
         void ctx.engine.runTurn(session, { turnId, text: msg.text, channel: 'text' }, sinkFor(c, turnId)).catch((e) => {
@@ -314,6 +316,7 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
         const wf = typeof msg.workflowId === 'string' ? ctx.workflows.get(msg.workflowId) : undefined;
         if (!wf) return err(c, 'unknown_workflow', 'That workflow does not exist.');
         session.activeTurn?.abort.abort();
+        c.voice?.clearAwaiting();
         session.workflowId = wf.id;
         if (wf.opener) await runOpener(c);
         return;

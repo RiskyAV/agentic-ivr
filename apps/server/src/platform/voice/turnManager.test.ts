@@ -310,11 +310,12 @@ describe('VoiceSession', () => {
   });
 
   /** Proposal turn; resolves once its read-back utterance has been fully spoken (TTS final arrived). */
-  async function proposed(s: Awaited<ReturnType<typeof setup>>) {
+  async function proposed(s: Awaited<ReturnType<typeof setup>>, opts: { played?: boolean } = {}) {
     s.stt.emit('committed', 'I want to prepay fifty thousand');
     await waitFor(() => s.msgs('action_proposal').length === 1 && s.msgs('assistant_done').length === 1, 4000, 'proposal');
     const seq = s.msgs('tts_begin')[0]!.turnSeq;
-    await waitFor(() => s.tts_ends(seq) === 1, 2000, 'read-back spoken');
+    await waitFor(() => s.tts_ends(seq) === 1, 2000, 'read-back generated');
+    if (opts.played !== false) s.vs.onPlaybackReport(seq, s.audioMs(seq)); // the client finished playing it
     return s.msgs('action_proposal')[0]!.proposal;
   }
 
@@ -351,6 +352,7 @@ describe('VoiceSession', () => {
     expect(rereadTts.texts.join('')).toMatch(/^Just to confirm: Prepay fifty thousand rupees.*Shall I go ahead\? $/);
     expect(s.msgs('assistant_done')[2]!.text).toMatch(/^Just to confirm: Prepay ₹50,000/);
     await waitFor(() => s.tts_ends(reread.turnSeq) === 1, 2000, 're-read spoken');
+    s.vs.onPlaybackReport(reread.turnSeq, s.audioMs(reread.turnSeq));
     expect(s.logged.filter((e) => e.type === 'user_input').map((e) => e.text)).toEqual(['Yes.']);
 
     s.stt.emit('committed', 'yes');
@@ -371,6 +373,55 @@ describe('VoiceSession', () => {
     s.stt.emit('committed', 'Yes, go ahead.');
     await waitFor(() => s.confirm.mock.calls.length === 1, 3000);
     expect(s.confirm).toHaveBeenCalledWith(prop.id, prop.termsHash);
+  });
+
+  it('a "yes" after the read-back is generated but before its playback ends is not consent; after the end it is', async () => {
+    const s = await setup({ rules: [PREPAY_RULE], cfg: { playbackMarginMs: 100 } });
+    const prop = await proposed(s, { played: false });
+    s.stt.emit('committed', 'yes');
+    await waitFor(() => s.msgs('assistant_done').length === 2, 2000);
+    expect(s.confirm).not.toHaveBeenCalled();
+    expect(s.msgs('assistant_done')[1]!.text).toContain('Just to confirm');
+    // No playback_report this time: the estimated playback end (audio length + margin) arms it.
+    const reread = s.msgs('tts_begin').at(-1)!;
+    await waitFor(() => s.tts_ends(reread.turnSeq) === 1, 2000);
+    await sleep(s.audioMs(reread.turnSeq) + 200);
+    s.stt.emit('committed', 'yes');
+    await waitFor(() => s.confirm.mock.calls.length === 1, 3000);
+    expect(s.confirm).toHaveBeenCalledWith(prop.id, prop.termsHash);
+  }, 15000);
+
+  it('a "yes" whose speech began before the read-back finished playing is re-read, even if committed after', async () => {
+    const s = await setup({ rules: [PREPAY_RULE] });
+    await proposed(s, { played: false });
+    s.stt.emit('partial', 'yes'); // spoken over the end of "Shall I go ahead?"
+    const seq = s.msgs('tts_begin')[0]!.turnSeq;
+    s.vs.onPlaybackReport(seq, s.audioMs(seq));
+    s.stt.emit('committed', 'yes');
+    await waitFor(() => s.msgs('assistant_done').length === 2, 2000);
+    expect(s.confirm).not.toHaveBeenCalled();
+    expect(s.msgs('assistant_done')[1]!.text).toContain('Just to confirm');
+  });
+
+  it('the re-read uses the spoken terms: if the pending terms no longer match, "yes" is a normal turn', async () => {
+    const s = await setup({ rules: [PREPAY_RULE] });
+    await proposed(s, { played: false });
+    (s.actions.pending(s.session.id)[0] as { termsHash: string }).termsHash = 'changed';
+    s.stt.emit('committed', 'yes');
+    await waitFor(() => s.msgs('turn_start').length === 2, 2000);
+    await waitFor(() => s.msgs('assistant_done').length === 2, 4000);
+    expect(s.msgs('assistant_done')[1]!.text).not.toContain('Just to confirm');
+    expect(s.confirm).not.toHaveBeenCalled();
+  });
+
+  it('a typed turn after a fully heard read-back clears the awaited consent', async () => {
+    const s = await setup({ rules: [PREPAY_RULE, EMI_RULE] });
+    await proposed(s);
+    s.vs.clearAwaiting(); // the gateway does this when a user_text turn starts
+    s.stt.emit('committed', 'yes');
+    await waitFor(() => s.msgs('assistant_done').length === 2, 2000);
+    expect(s.confirm).not.toHaveBeenCalled();
+    expect(s.msgs('assistant_done')[1]!.text).toContain('Just to confirm');
   });
 
   it('"yes" while a proposal is held but not yet surfaced never confirms or executes it', async () => {
