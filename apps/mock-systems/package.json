@@ -3,5 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "dependencies": { "@app/shared": "*", "@app/domain": "*" }
+  "dependencies": {
+    "@app/domain": "*",
+    "@app/shared": "*",
+    "fastify": "^5.12.7"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "dev": "tsx watch src/main.ts"
+  }
 }
