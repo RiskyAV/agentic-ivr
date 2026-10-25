@@ -19,6 +19,9 @@ import { WorkflowRegistry } from './platform/workflows/registry.js';
 import { loanServicingActions } from './workflows/loan-servicing/actions.js';
 import { loanServicing } from './workflows/loan-servicing/index.js';
 import { loanServicingTools } from './workflows/loan-servicing/tools.js';
+import { collectionsActions } from './workflows/collections/actions.js';
+import { collections } from './workflows/collections/index.js';
+import { collectionsTools } from './workflows/collections/tools.js';
 import type { Config } from './config.js';
 import type { GatewayCtx, VoiceVendors } from './gateway/context.js';
 import { DEFAULT_KEYTERMS, elevenLabsStt } from './platform/voice/stt.js';
@@ -69,11 +72,12 @@ export async function buildApp(config: Config, opts: AppOptions = {}): Promise<A
 
   const connectors = buildConnectors(fetchTransport(config.mockBaseUrl));
   const audit = new AuditLog();
-  const actions = new ActionService(loanServicingActions, audit);
+  const actions = new ActionService([...loanServicingActions, ...collectionsActions], audit);
   const tools = new ToolRegistry();
   for (const t of loanServicingTools) tools.register(t);
-  for (const a of loanServicingActions) tools.register(actions.proposeTool(a.type));
-  const workflows = new WorkflowRegistry().register(loanServicing);
+  for (const t of collectionsTools) tools.register(t);
+  for (const a of [...loanServicingActions, ...collectionsActions]) tools.register(actions.proposeTool(a.type));
+  const workflows = new WorkflowRegistry().register(loanServicing).register(collections);
   const eventLog = new EventLog(config.eventLogDir);
   const metrics = new Metrics();
   const limiter = new Limiter(config.llmMaxConcurrency, config.llmQueueTimeoutMs);

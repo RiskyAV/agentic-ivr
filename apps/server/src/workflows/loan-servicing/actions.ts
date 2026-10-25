@@ -12,7 +12,7 @@ import { simulatePrepaymentTool } from './tools.js';
 const loanIdField = z.string().min(1).describe('The id of the loan, as returned by the loan tools.');
 
 /** Normalises a loosely phrased amount (number or string) to integer paise; rejects what it cannot parse. */
-const paiseField = z
+export const paiseField = z
   .preprocess((v) => (typeof v === 'number' ? String(v) : v), z.string().min(1))
   .describe('Amount as the customer said it, e.g. "50k", "1.5 lakh" or "50000".')
   .transform((s, c) => {
@@ -24,10 +24,10 @@ const paiseField = z
     return r.paise;
   });
 
-const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'use YYYY-MM-DD').refine((s) => !Number.isNaN(Date.parse(`${s}T00:00:00Z`)) && new Date(`${s}T00:00:00Z`).toISOString().startsWith(s), 'not a real date');
+export const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'use YYYY-MM-DD').refine((s) => !Number.isNaN(Date.parse(`${s}T00:00:00Z`)) && new Date(`${s}T00:00:00Z`).toISOString().startsWith(s), 'not a real date');
 
 /** Creates the Ops service request; the proposal id is the idempotency key. Caches that the new request makes stale are dropped. */
-async function createRequest(ctx: ToolContext, type: OpsRequestType, params: Record<string, unknown>, idemKey: string, label: string, invalidateLoanId?: string) {
+export async function createRequest(ctx: ToolContext, type: OpsRequestType, params: Record<string, unknown>, idemKey: string, label: string, invalidateLoanId?: string) {
   const r = await ctx.connectors.ops.create(ctx.customerId, type, params, idemKey, { signal: ctx.signal, observer: ctx.tracer.observer });
   if (!r.ok) throw new Error(`ops create failed: ${r.error}`);
   ctx.connectors.invalidate('ops', `ops:requests:${ctx.customerId}`);

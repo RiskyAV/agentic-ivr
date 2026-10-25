@@ -16,6 +16,12 @@ function useCountdown(expiresAt: number, active: boolean): number {
   return Math.max(0, expiresAt - now);
 }
 
+/** Turns a URL in a result message (e.g. a payment link) into a clickable link. */
+function linkify(msg: string) {
+  return msg.split(/(https?:\/\/[^\s)]+)/g).map((part, i) =>
+    /^https?:\/\//.test(part) ? <a key={i} href={part} target="_blank" rel="noreferrer" className="font-medium underline">{part}</a> : part);
+}
+
 const HEADINGS: Record<ProposalItem['status'], string> = {
   pending: 'Review and confirm', confirming: 'Review and confirm', executed: 'Completed', failed: 'Not completed', rejected: 'Cancelled', expired: 'Expired',
 };
@@ -92,7 +98,7 @@ export function ActionCard({ item }: { item: ProposalItem }) {
             <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
             <div>
               <p className="font-semibold">Done{item.reference && <> · Reference <span className="tnum" data-testid="action-reference">{item.reference}</span></>}</p>
-              {item.message && <p className="mt-0.5 text-emerald-700">{item.message}</p>}
+              {item.message && <p className="mt-0.5 break-words text-emerald-700">{linkify(item.message)}</p>}
             </div>
           </div>
         )}
