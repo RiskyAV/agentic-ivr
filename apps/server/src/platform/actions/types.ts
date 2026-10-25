@@ -4,7 +4,7 @@ import type { BoundValue } from '../grounding/values.js';
 import type { ToolContext } from '../tools/types.js';
 
 export type ValidateResult =
-  | { ok: true; figures: Record<string, BoundValue>; summary: string; sources?: Source[] }
+  | { ok: true; figures: Record<string, BoundValue>; summary: string; sources?: Source[]; /** Normalised params to store on the proposal (so they enter the terms hash), e.g. an alias resolved to a real id. */ params?: unknown }
   | { ok: false; reason: string };
 
 /** What a workflow offers as a customer-confirmable action. Validation and execution are separate steps. */

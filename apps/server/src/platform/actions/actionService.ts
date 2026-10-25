@@ -87,8 +87,8 @@ export class ActionService {
     if (!v.ok) return { ok: false, reason: v.reason };
     const proposal: Proposal = {
       id: `PRP-${randomUUID().slice(0, 8)}`, sessionId: ctx.session.id, customerId: ctx.customerId, type,
-      params, figures: v.figures, summary: v.summary, sources: v.sources ?? [],
-      termsHash: computeTermsHash(type, params, v.figures), expiresAt: this.now() + this.ttlMs, status: 'pending',
+      params: v.params ?? params, figures: v.figures, summary: v.summary, sources: v.sources ?? [],
+      termsHash: computeTermsHash(type, v.params ?? params, v.figures), expiresAt: this.now() + this.ttlMs, status: 'pending',
     };
     this.proposals.set(proposal.id, proposal);
     this.sessions.set(proposal.id, ctx.session);

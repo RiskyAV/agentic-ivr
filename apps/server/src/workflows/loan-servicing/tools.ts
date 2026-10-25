@@ -8,6 +8,7 @@ import { count, date, money, months, pct, text, type BoundValue } from '../../pl
 import {
   Gather, calcSource, citeClause, dedupeSources, recordSource, requireLoan, startPolicy,
 } from '../../platform/tools/helpers.js';
+import { assessBounce, failedPaymentsAllLoans } from './payments.js';
 import { ToolFailure, type ToolContext, type ToolDef, type ToolResult } from '../../platform/tools/types.js';
 
 type Values = Record<string, BoundValue>;
@@ -114,23 +115,23 @@ const getPaymentHistory: ToolDef<{ loanId?: string; months?: number; status?: 'f
     const values: Values = { 'payments.count': count(list.length) };
     const sources: Source[] = [loanSrc(loan.loanId, loan.product)];
     let bounceClause: PolicyClause | undefined;
-    // Ordinal aliases, newest first (ties by id, descending). The dispute action resolves them in the same order.
+    // `failed_N` numbers the customer's failed payments across all loans (shared helper), the same order the dispute action uses.
+    const allFailed = await failedPaymentsAllLoans(ctx);
+    if (!allFailed.ok) throw new ToolFailure({ ok: false, error: 'unavailable', message: allFailed.reason });
+    const failedIndex = new Map(allFailed.data.map((p, i) => [p.paymentId, i + 1]));
     const ordered = [...list].sort((x, y) => y.date.localeCompare(x.date) || y.paymentId.localeCompare(x.paymentId));
     let nFailed = 0;
     let nPaid = 0;
     let totalRefundable = 0;
     const rows = ordered.map((p) => {
-      const alias = p.status === 'failed' ? `failed_${++nFailed}` : `${p.status === 'success' ? 'paid' : 'pending'}_${++nPaid}`;
+      const alias = p.status === 'failed' ? `failed_${failedIndex.get(p.paymentId) ?? 1000 + ++nFailed}` : `${p.status === 'success' ? 'paid' : 'pending'}_${++nPaid}`;
       const keys = [`payments.${p.paymentId}`, `payments.${alias}`];
       const put = (field: string, v: BoundValue) => keys.forEach((k) => { values[`${k}.${field}`] = v; });
       put('amount', money(p.amount));
       put('date', date(p.date));
       let charge: { levied: number; due: number; refundable: number } | undefined;
       if (p.status === 'failed') {
-        const rule = bounceRule(p.failureCode ?? '', ctx.today);
-        const levied = p.bounceCharge ?? 0;
-        const due = rule.chargeable ? rule.amount : 0;
-        const refundable = Math.max(levied - due, 0);
+        const { levied, due, refundable, clause } = assessBounce(p, ctx.today);
         charge = { levied, due, refundable };
         totalRefundable += refundable;
         put('bounce_charge_levied', money(levied));
@@ -138,7 +139,7 @@ const getPaymentHistory: ToolDef<{ loanId?: string; months?: number; status?: 'f
         put('refundable', money(refundable));
         put('disputable', text(refundable > 0 ? 'yes' : 'no'));
         put('failure_reason', text(p.failureReason ?? 'the payment did not go through'));
-        bounceClause = rule.clause;
+        bounceClause = clause;
       }
       const { paymentId, bounceCharge: _levied, ...rest } = p;
       return { ref: paymentId, alias, ...rest, ...(charge && {
@@ -146,7 +147,7 @@ const getPaymentHistory: ToolDef<{ loanId?: string; months?: number; status?: 'f
       }) };
     });
     if (bounceClause) sources.push(citeClause(ctx, g, bounceClause, await pol));
-    values['payments.failed_count'] = count(nFailed);
+    values['payments.failed_count'] = count(ordered.filter((p) => p.status === 'failed').length);
     values['payments.total_refundable'] = money(totalRefundable);
     const table: TableView = {
       title: `Payments for ${loan.loanId}`,
@@ -408,6 +409,7 @@ const checkForeclosure: ToolDef<{ loanId?: string }> = {
       'foreclosure.penalty_free': text(rule.eligible && rule.chargePct === 0 ? 'yes' : 'no'),
     };
     if (rule.lockInEndsOn) values['foreclosure.lock_in_ends_on'] = date(rule.lockInEndsOn);
+    if (!rule.eligible) values['foreclosure.blocked_reason'] = text('the loan is still within its lock-in period, during which it cannot be foreclosed');
     const sources: Source[] = [loanSrc(loan.loanId, loan.product), citeClause(ctx, g, rule.clause, rule.clause.topic === 'foreclosure' ? await polFc : await polPre), citeClause(ctx, g, prepay.clause, await polPre)];
     let quote;
     if (rule.eligible) {

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { rupees, simulatePrepayment } from '@app/domain';
+import { rupees, simulatePrepayment, type Payment } from '@app/domain';
+import { ActionService } from '../../platform/actions/actionService.js';
+import { AuditLog } from '../../platform/actions/audit.js';
+import { loanServicingActions } from './actions.js';
 import { formatBound } from '../../platform/grounding/values.js';
 import { ToolRegistry } from '../../platform/tools/registry.js';
 import { makeHarness } from '../../platform/tools/testkit.js';
@@ -187,6 +190,51 @@ describe('get_payment_history', () => {
     expect(JSON.stringify(rows).match(/PAY-/g)?.length).toBe(rows.length);
     expect(r.tables?.[0]?.rows).toHaveLength(2);
     expect(r.sources).toContainEqual(expect.objectContaining({ kind: 'clause', ref: 'BC-01 v1' }));
+  });
+});
+
+describe('failed_N aliases across loans', () => {
+  it('numbering spans all loans and matches the dispute action', async () => {
+    const h = harness();
+    const base = h.ctxFor('C1002');
+    const pay = (id: string, loanId: string, date: string): Payment => ({
+      paymentId: id, loanId, date, amount: 1_000_000, status: 'failed', failureCode: 'BANK_TECHNICAL_FAILURE', failureReason: 'bank failure', bounceCharge: 59000,
+    });
+    const byLoan: Record<string, Payment[]> = {
+      'PL-55102': [pay('PAY-A-1', 'PL-55102', '2026-08-05'), pay('PAY-A-2', 'PL-55102', '2026-06-05')],
+      'PL-99999': [pay('PAY-B-1', 'PL-99999', '2026-09-05'), pay('PAY-B-2', 'PL-99999', '2026-07-05')],
+    };
+    const real = base.connectors;
+    const connectors = {
+      ...real,
+      lms: { ...real.lms, getLoans: async (c: string, cc: never) => {
+        const r = await real.lms.getLoans(c, cc);
+        return r.ok ? { ...r, data: [...r.data, { ...r.data[0]!, loanId: 'PL-99999' }] } : r;
+      } },
+      payments: { ...real.payments, list: async (loanId: string) => ({ ok: true as const, data: byLoan[loanId] ?? [] }) },
+    } as typeof real;
+    const ctx = { ...base, connectors };
+    const r = ok(await h.reg.run('get_payment_history', { loanId: 'PL-55102', months: 6, status: 'failed' }, ctx));
+    // Across both loans, newest first: B-1 (Sep), A-1 (Aug), B-2 (Jul), A-2 (Jun). Loan PL-55102 holds failed_2 and failed_4.
+    expect(r.values['payments.failed_2.date']).toEqual({ kind: 'date', iso: '2026-08-05' });
+    expect(r.values['payments.failed_4.date']).toEqual({ kind: 'date', iso: '2026-06-05' });
+    expect(r.values['payments.failed_1.date']).toBeUndefined();
+    const svc = new ActionService(loanServicingActions, new AuditLog());
+    const p = await svc.propose(ctx, 'dispute', { paymentId: 'failed_2', reason: 'bank failure' });
+    expect(p.ok && p.proposal.params).toEqual({ paymentId: 'PAY-A-1', reason: 'bank failure' });
+  });
+});
+
+describe('check_foreclosure in lock-in', () => {
+  it('not eligible: penalty_free no, blocked reason and lock-in date, no penalty amount', async () => {
+    const h = harness();
+    const ctx = { ...h.ctxFor('C1002'), today: '2026-01-10' };
+    const r = ok(await h.reg.run('check_foreclosure', {}, ctx));
+    expect(r.values['foreclosure.eligible']).toEqual({ kind: 'text', s: 'no' });
+    expect(r.values['foreclosure.penalty_free']).toEqual({ kind: 'text', s: 'no' });
+    expect(r.values['foreclosure.blocked_reason']?.kind).toBe('text');
+    expect(r.values['foreclosure.lock_in_ends_on']).toEqual({ kind: 'date', iso: '2026-03-05' });
+    expect(r.values['foreclosure.penalty_amount']).toBeUndefined();
   });
 });
 

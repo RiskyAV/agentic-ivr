@@ -154,17 +154,33 @@ describe('ActionService', () => {
     expect(good.summary).not.toContain(charged!.paymentId);
   });
 
-  it('(g2) dispute accepts the ordinal alias, resolved against the customer\'s own failed payments', async () => {
+  it('(g2) dispute alias is frozen to the real payment id and date at propose; policy-valid charges are rejected', async () => {
     const s = setup();
     const priya = s.ctxFor('C1002');
+    const pays = await s.connectors.payments.list('PL-55102', { status: 'failed' }, { signal: priya.signal });
+    if (!pays.ok) throw new Error('no payments');
+    const aug = pays.data.find((p) => p.date === '2026-08-05')!;
     const first = await okP(s.svc.propose(priya, 'dispute', { paymentId: 'failed_1', reason: 'Bank failure' }));
+    expect(first.params).toEqual({ paymentId: aug.paymentId, reason: 'Bank failure' });
     expect(first.figures['dispute.disputed_amount']).toEqual({ kind: 'money', paise: 59000 });
-    // An alias beyond the customer's own failed payments is rejected.
-    const missing = await s.svc.propose(priya, 'dispute', { paymentId: 'failed_9', reason: 'x' });
-    expect(missing.ok).toBe(false);
-    // Rahul has no failed payments, so an alias cannot reach Priya's.
-    const rahul = await s.svc.propose(s.ctxFor('C1001'), 'dispute', { paymentId: 'failed_1', reason: 'x' });
-    expect(rahul.ok).toBe(false);
+    expect(first.figures['dispute.payment_date']).toEqual({ kind: 'date', iso: '2026-08-05' });
+    const byId = await okP(s.svc.propose(priya, 'dispute', { paymentId: aug.paymentId, reason: 'Bank failure' }));
+    expect(byId.params).toEqual(first.params);
+    // Execute sends only the stored real id to ops.
+    const out = await s.svc.confirm(priya.session, first.id, first.termsHash, 'ui', priya);
+    expect(out.status).toBe('executed');
+    const reqs = (await s.app.inject({ method: 'GET', url: '/ops/requests?customerId=C1002' })).json() as { requests: Array<{ params?: { paymentId?: string } }> };
+    expect(reqs.requests.some((r) => r.params?.paymentId === aug.paymentId)).toBe(true);
+    expect(JSON.stringify(reqs)).not.toContain('failed_1');
+    // 5 Jun was a valid charge under BC-01: rejected by alias and by id.
+    const jun = pays.data.find((p) => p.date === '2026-06-05')!;
+    for (const ref of ['failed_2', jun.paymentId]) {
+      const r = await s.svc.propose(priya, 'dispute', { paymentId: ref, reason: 'x' });
+      expect(r).toMatchObject({ ok: false });
+      expect((r as { reason: string }).reason).toContain('BC-01');
+    }
+    expect((await s.svc.propose(priya, 'dispute', { paymentId: 'failed_9', reason: 'x' })).ok).toBe(false);
+    expect((await s.svc.propose(s.ctxFor('C1001'), 'dispute', { paymentId: 'failed_1', reason: 'x' })).ok).toBe(false);
   });
 
   it('(h) response lost after the backend committed: retries are absorbed by the idempotency key, executed once', async () => {
