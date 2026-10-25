@@ -70,7 +70,9 @@ describe('buildPrompt', () => {
     const idx = ['{{key}}', '<untrusted_data>', 'propose_', 'Northstar Finance', 'PRE-01', '## Customer snapshot', '## Conversation memory', '## Channel style'].map((s) => system.indexOf(s));
     expect(idx.every((i) => i >= 0)).toBe(true);
     expect([...idx].sort((a, b) => a - b)).toEqual(idx);
-    expect(system).not.toContain('2026-10-25');
+    // Today's date is in the volatile snapshot section only, never in the cacheable prefix.
+    expect(system.slice(0, system.indexOf('## Customer snapshot'))).not.toContain('2026-10-25');
+    expect(system).toContain("Today's date is 2026-10-25");
   });
 
   it('voice adds style block, text differs', () => {

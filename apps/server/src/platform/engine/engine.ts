@@ -9,7 +9,7 @@ import type { HistoryEntry, Session } from '../context/session.js';
 import { loadSnapshot, type CustomerSnapshot } from '../context/snapshot.js';
 import { numericCheck } from '../grounding/numericCheck.js';
 import { PlaceholderRenderer } from '../grounding/renderer.js';
-import { formatBound, type BoundValue } from '../grounding/values.js';
+import { date, formatBound, type BoundValue } from '../grounding/values.js';
 import type { AuditLog } from '../actions/audit.js';
 import { refusalFor } from '../guard/refusal.js';
 import type { Guard, GuardVerdict, RefusalFn } from '../guard/types.js';
@@ -186,7 +186,7 @@ export class Engine {
       type: 'backend_call', system: e.system, method: e.method ?? 'GET', path: e.path ?? e.key,
       ...(e.status !== undefined && { status: e.status }), ...(e.body !== undefined && { body: e.body }), outcome: e.outcome,
     }));
-    log({ type: 'user_input', text: input.text, channel });
+    log({ type: 'user_input', text: input.text, channel, workflowId: session.workflowId, customerId: session.customerId });
 
     const budget = new AbortController();
     const budgetTimer = setTimeout(() => budget.abort(), Math.max(0, cfg.turnBudgetMs));
@@ -547,6 +547,7 @@ export class Engine {
         return;
       }
       Object.assign(t.values, result.values ?? {});
+      if (result.ok && result.stale) t.values['stale.as_of'] = date(result.stale.asOf.slice(0, 10));
       t.updateEntities(call.name, result);
       if (result.ok) {
         t.sources.push(...result.sources);
@@ -565,7 +566,7 @@ export class Engine {
             data: wrapStrings(redact(result.data)),
             values: valueList(result.values),
             sources: result.sources.map((x) => x.ref),
-            ...(result.stale && { stale_as_of: result.stale.asOf }),
+            ...(result.stale && { stale: 'These figures come from an earlier successful check, not live data. Say they are as of {{stale.as_of}}.' }),
           },
         });
       } else {
