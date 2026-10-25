@@ -30,4 +30,17 @@ describe('simulatePrepayment', () => {
     expect(s.netSavingTenure).toBe(s.reduceTenure.interestSaved - rupees(2000));
     expect(s.netSavingEmi).toBe(s.reduceEmi.interestSaved - rupees(2000));
   });
+  it('charges on min(amount, outstanding) and closes the loan when over-paying', () => {
+    const s = simulatePrepayment({ ...base, amount: rupees(3_000_000), chargePct: 4 });
+    expect(s.charge).toBe(rupees(100_000));
+    expect(s.reduceTenure.months).toBe(0);
+    expect(s.reduceEmi.newEmi).toBe(0);
+    expect(s.reduceEmi.interest).toBe(0);
+    expect(s.reduceTenure.interestSaved).toBe(s.baseline.interest);
+    expect(s.reduceEmi.interestSaved).toBe(s.baseline.interest);
+  });
+  it('throws when the EMI does not cover interest', () => {
+    expect(() => simulatePrepayment({ ...base, emi: rupees(100) })).toThrow(new RangeError('EMI does not cover interest'));
+    expect(() => simulatePrepayment({ ...base, emi: 0 })).toThrow(RangeError);
+  });
 });

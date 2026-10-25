@@ -13,6 +13,7 @@ export interface ForeclosureQuote {
 export function foreclosureQuote(args: {
   outstanding: Paise;
   annualRateBps: number;
+  /** The most recent instalment due date on or before onDate. */
   lastDueDate: string;
   onDate: string;
   chargePct: number;

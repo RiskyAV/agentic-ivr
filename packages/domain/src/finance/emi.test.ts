@@ -33,6 +33,11 @@ describe('amortise', () => {
     const rows = amortise(args);
     expect(totalInterest(rows)).toBe(rows.reduce((s, r) => s + r.interest, 0));
   });
+  it('throws when the EMI cannot amortise the principal', () => {
+    expect(() => amortise({ ...args, emi: rupees(500) })).toThrow(new RangeError('EMI does not cover interest'));
+    expect(() => amortise({ ...args, emi: rupees(1000) })).toThrow(RangeError);
+    expect(() => amortise({ ...args, emi: 0 })).toThrow(RangeError);
+  });
   it('respects maxMonths', () => {
     expect(amortise({ ...args, maxMonths: 3 })).toHaveLength(3);
   });

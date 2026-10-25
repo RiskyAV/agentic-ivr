@@ -35,6 +35,10 @@ export function amortise(args: {
   const max = args.maxMonths ?? DEFAULT_MAX_MONTHS;
   const rows: ScheduleRow[] = [];
   let opening = args.principal;
+  const firstInterest = Math.round((opening * args.annualRateBps) / 120_000);
+  if (opening > 0 && args.emi < opening + firstInterest && args.emi <= firstInterest) {
+    throw new RangeError('EMI does not cover interest');
+  }
   for (let n = 1; n <= max && opening > 0; n++) {
     const interest = Math.round((opening * args.annualRateBps) / 120_000);
     const last = args.emi >= opening + interest;
@@ -54,6 +58,12 @@ export function totalInterest(rows: ScheduleRow[]): Paise {
 /** Whole months to clear `outstanding` at `emi` (a final partial instalment counts as a month). Infinity if the EMI never clears it. */
 export function remainingTenure(outstanding: Paise, annualRateBps: number, emiAmount: Paise): number {
   if (outstanding <= 0) return 0;
-  const rows = amortise({ principal: outstanding, annualRateBps, emi: emiAmount, firstDueDate: '2000-01-01' });
+  let rows: ScheduleRow[];
+  try {
+    rows = amortise({ principal: outstanding, annualRateBps, emi: emiAmount, firstDueDate: '2000-01-01' });
+  } catch (e) {
+    if (e instanceof RangeError) return Infinity;
+    throw e;
+  }
   return rows[rows.length - 1]!.closing === 0 ? rows.length : Infinity;
 }

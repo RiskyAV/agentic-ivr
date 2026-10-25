@@ -34,7 +34,7 @@ export function simulatePrepayment(args: {
   const emiRows = run(afterPrepay, newEmi);
   const emiInterest = totalInterest(emiRows);
 
-  const charge = Math.round((amount * args.chargePct) / 100);
+  const charge = Math.round((Math.min(amount, outstanding) * args.chargePct) / 100);
   const reduceTenure = {
     months: tenureRows.length,
     monthsSaved: baseline.months - tenureRows.length,

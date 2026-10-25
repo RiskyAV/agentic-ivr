@@ -30,12 +30,13 @@ export interface Loan {
   remainingMonths: number;
   disbursedOn: string;
   nextDueDate: string;
-  lastDueDate?: string;
+  /** Most recent instalment due date already passed (on or before today); accrual start for foreclosure. */
+  lastPaidDueDate?: string;
+  /** Selects policy clauses (versioned in code, D-017) together with product, rateType and borrower. */
+  borrower: 'individual' | 'business';
+  sanctionDate: string;
   rateHistory: RateChange[];
   emiHistory: EmiChange[];
-  prepaymentChargePct: number;
-  foreclosureChargePct: number;
-  penalRateBpsPa: number;
 }
 
 export interface Payment {
@@ -46,6 +47,7 @@ export interface Payment {
   status: 'success' | 'failed' | 'pending';
   failureCode?: string;
   failureReason?: string;
+  /** The charge actually levied on this payment's bounce. A recorded outcome that may contradict policy; never use it as the policy figure. */
   bounceCharge?: Paise;
 }
 
