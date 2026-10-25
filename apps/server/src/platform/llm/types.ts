@@ -4,6 +4,8 @@ export interface ToolCall {
   id: string;
   name: string;
   args: unknown;
+  /** Opaque provider thought signature (Gemini 3); must be replayed unchanged with this call. */
+  thoughtSignature?: string;
 }
 
 export type LlmMessage =
@@ -14,7 +16,7 @@ export type LlmMessage =
 export type LlmChunk =
   | { type: 'text'; text: string }
   | { type: 'tool_calls'; calls: ToolCall[] }
-  | { type: 'done'; usage?: { inputTokens: number; cachedTokens?: number; outputTokens: number } };
+  | { type: 'done'; finishReason?: string; blocked?: boolean; usage?: { inputTokens: number; cachedTokens?: number; outputTokens: number } };
 
 export interface LlmRequest {
   model?: string;

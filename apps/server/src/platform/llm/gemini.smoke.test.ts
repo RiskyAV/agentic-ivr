@@ -39,6 +39,21 @@ describe.skipIf(!process.env.GEMINI_API_KEY)('Gemini smoke (real API)', () => {
     expect(calls && calls.type === 'tool_calls' && calls.calls[0]?.name).toBe('get_loan_details');
   }, 30_000);
 
+  it('round-trips a function response back to a text answer (thought signatures replayed)', async () => {
+    const tools = [{ name: 'get_code', description: 'Returns the secret code', parameters: { type: 'object' as const, properties: {} } }];
+    const system = 'Call get_code, then tell the user the code it returned.';
+    const user = { role: 'user' as const, text: 'What is the secret code?' };
+    const first = await collect(client.stream({ system, tools, messages: [user] }, new AbortController().signal));
+    const tc = first.find((c) => c.type === 'tool_calls');
+    if (!tc || tc.type !== 'tool_calls') throw new Error('no tool call');
+    const second = await collect(client.stream({
+      system, tools,
+      messages: [user, { role: 'assistant', toolCalls: tc.calls }, { role: 'tool', results: tc.calls.map((c) => ({ callId: c.id, name: c.name, response: { code: 'ZEBRA-42' } })) }],
+    }, new AbortController().signal));
+    const text = second.filter((c) => c.type === 'text').map((c) => (c as { text: string }).text).join('');
+    expect(text).toMatch(/ZEBRA-42/);
+  }, 30_000);
+
   it('checkModels reports missing names', async () => {
     const missing = await checkModels(client, [model, 'definitely-not-a-model-xyz']);
     expect(missing).toContain('definitely-not-a-model-xyz');

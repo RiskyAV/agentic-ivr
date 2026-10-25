@@ -94,7 +94,8 @@ const TEXT_STYLE = `## Channel style
 Text chat. Be concise. Short lists are fine when comparing options; keep each reply to a few lines.`;
 
 export function wrapUntrusted(text: string): string {
-  return `<untrusted_data>${text.replace(/<\/?untrusted_data>/gi, '')}</untrusted_data>`;
+  // Neutralise every angle bracket so the payload can never form (or split into) a closing tag.
+  return `<untrusted_data>${text.replace(/</g, '\u2039').replace(/>/g, '\u203a')}</untrusted_data>`;
 }
 
 function topicsOf(older: HistoryEntry[]): string {
