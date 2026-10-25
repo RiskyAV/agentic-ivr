@@ -202,3 +202,14 @@ Status: `Accepted` = agreed, `Proposed` = suggested but not yet confirmed, `Supe
 - **Decision:** Audio travels as binary WebSocket frames: a 4-byte big-endian uint32 `turnSeq` followed by PCM16LE. Upstream mic frames use `turnSeq = 0`. Control messages stay JSON. The helpers `encodeAudioFrame`/`decodeAudioFrame` live in `@app/shared`.
 - **Why:** The header lets the client drop stale audio from an interrupted turn cheaply (compare `turnSeq` with the current one) and lets the server tag TTS output per turn, with no JSON parsing on the hot path.
 - **Rejected:** base64 audio inside JSON messages, which adds about 33% overhead and makes stale-audio filtering harder.
+
+## D-028 — UTC ISO-string date math; speech rounds paise to rupees
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:** Business dates are `YYYY-MM-DD` strings and all date math (`addMonths`, `monthsBetween`, `daysBetween`) uses UTC components, so timezone never shifts a date. `today()` reads `DEMO_TODAY` at call time, not at module load. `addMonths` clamps to month end, and `monthsBetween` treats a clamped month end as a full month, which keeps it consistent with `addMonths`. `speakInr` rounds paise to whole rupees (zero is "zero rupees").
+- **Why:** Tests and demos can change the clock per call, and spoken amounts stay short.
+- **Rejected:** `Date` local-time arithmetic, which drifts across DST and server timezones.
+
+## D-029 — Amount parsing is strict and shares the speech vocabulary
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:** `parseAmount` accepts digits with ₹/Rs/commas and the suffixes k, l, lakh, lac, cr and crore, or number words up to crore. The word table is the reverse of the one `speakInr` uses (`ONES`/`TENS` exported from `format/inr.ts`). Scales must strictly descend ("one thousand lakh" and "50 crore crore" are rejected). Negative, zero, more than 2 decimal places, or partially parsed input is rejected with a reason and never guessed.
+- **Why:** A mis-heard amount that moves money is worse than asking again.
