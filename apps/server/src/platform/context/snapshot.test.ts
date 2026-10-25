@@ -68,3 +68,23 @@ describe('InMemorySessionStore', () => {
     expect(st.get('b')).toBeDefined();
   });
 });
+
+describe('loadSnapshot open requests', () => {
+  it('open requests: empty at first, then the created request (newest first, whitelisted params)', async () => {
+    const c = setup();
+    expect((await loadSnapshot(c, 'C1001', ctx())).openRequests).toEqual([]);
+    const r = await c.ops.create('C1001', 'prepayment', { loanId: 'HL-88231', amountPaise: 5_000_000, mode: 'reduce_tenure', note: 'x' }, 'k1', ctx());
+    expect(r.ok).toBe(true);
+    c.invalidate('ops', 'ops:requests:C1001');
+    const v = toSnapshotView(await loadSnapshot(c, 'C1001', ctx()));
+    expect(v.openRequests).toHaveLength(1);
+    expect(v.openRequests![0]).toMatchObject({ type: 'prepayment', status: 'open', loanId: 'HL-88231', amountPaise: 5_000_000, detail: 'reduce_tenure' });
+    expect(JSON.stringify(v.openRequests)).not.toContain('note');
+  });
+  it('ops failure is partial and omits open requests', async () => {
+    const s = await loadSnapshot(setup({ ops: { failRate: 1, minMs: 0, maxMs: 0 } }), 'C1001', ctx());
+    expect(s.partial).toEqual(['ops']);
+    expect(s.openRequests).toBeUndefined();
+    expect(s.loans).toHaveLength(1);
+  }, 10_000);
+});

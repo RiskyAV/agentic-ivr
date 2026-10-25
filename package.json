@@ -2,16 +2,22 @@
   "name": "ai-loan-servicing-poc",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
-  "workspaces": ["packages/*", "apps/*"],
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
-    "dev": "concurrently -n mocks,server -c blue,green \"tsx watch apps/mock-systems/src/main.ts\" \"tsx watch apps/server/src/main.ts\"",
+    "dev": "concurrently -n mocks,server,web -c blue,green,magenta \"tsx watch apps/mock-systems/src/main.ts\" \"tsx watch apps/server/src/main.ts\" \"npm run dev -w @app/web\"",
     "test": "vitest run",
     "build": "tsc -b && npm run build -w @app/web"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "concurrently": "^9.0.0",
+    "playwright": "^1.64.1",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^3.0.0"

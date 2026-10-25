@@ -38,11 +38,25 @@ export interface PaymentRowView {
   note?: string;
 }
 
+/** An open service request (prepayment, dispute, statement...) raised for the customer. */
+export interface ServiceRequestView {
+  id: string;
+  type: string;
+  status: string;
+  createdAt: string;
+  loanId?: string;
+  amountPaise?: number;
+  /** Short, non-PII qualifier, e.g. the prepayment mode or the disputed payment id. */
+  detail?: string;
+}
+
 export interface SnapshotView {
   customer: { id: string; name: string };
   asOf: string;
   loans: LoanCardView[];
   recentPayments: PaymentRowView[];
+  /** Open service requests, newest first. Absent when Ops was unavailable. */
+  openRequests?: ServiceRequestView[];
   /** Systems that failed while loading the snapshot. */
   partial?: SystemName[];
 }

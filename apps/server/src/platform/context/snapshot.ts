@@ -1,7 +1,7 @@
 import { daysBetween, today, type Paise, type ProductType, type RateType } from '@app/domain';
-import type { LoanCardView, SnapshotView, SystemName } from '@app/shared';
+import type { LoanCardView, ServiceRequestView, SnapshotView, SystemName } from '@app/shared';
 import type { CallCtx, Connectors } from '../connectors/clients.js';
-import type { CrmCustomer, LoanRecordDto, PaymentDto } from '../connectors/types.js';
+import type { CrmCustomer, LoanRecordDto, OpsRequestDto, PaymentDto } from '../connectors/types.js';
 import { redact } from './redact.js';
 
 export interface LastPayment {
@@ -42,6 +42,8 @@ export interface CustomerSnapshot {
   loans: LoanSummary[];
   /** Most recent 5 payment rows across all loans, newest first. */
   recentPayments: RecentPayment[];
+  /** Open service requests, newest first; absent when Ops was unavailable. */
+  openRequests?: ServiceRequestView[];
   fetchedAt: string;
   partial: SystemName[];
 }
@@ -57,8 +59,11 @@ function overdue(pays: PaymentDto[], on: string): { amount: Paise; days: number 
 export async function loadSnapshot(c: Connectors, customerId: string, ctx: CallCtx): Promise<CustomerSnapshot> {
   const partial = new Set<SystemName>();
   const on = today();
-  const [cust, loansRes] = await Promise.all([c.crm.getCustomer(customerId, ctx), c.lms.getLoans(customerId, ctx)]);
+  const [cust, loansRes, reqs] = await Promise.all([
+    c.crm.getCustomer(customerId, ctx), c.lms.getLoans(customerId, ctx), c.ops.list(customerId, ctx),
+  ]);
   if (!cust.ok) partial.add('crm');
+  if (!reqs.ok) partial.add('ops');
   if (!loansRes.ok) partial.add('lms');
 
   const base = loansRes.ok ? loansRes.data : [];
@@ -104,8 +109,21 @@ export async function loadSnapshot(c: Connectors, customerId: string, ctx: CallC
         loanId: p.loanId, date: p.date, amount: p.amount, status: p.status, paymentId: p.paymentId,
         ...(p.failureReason && { failureReason: p.failureReason }),
       })),
+    ...(reqs.ok && { openRequests: reqs.data.filter((r) => r.status === 'open').map(toRequestView).reverse() }),
     fetchedAt: new Date().toISOString(),
     partial: [...partial],
+  };
+}
+
+/** Only whitelisted, non-PII params reach the UI. */
+function toRequestView(r: OpsRequestDto): ServiceRequestView {
+  const p = r.params;
+  const detail = typeof p.mode === 'string' ? p.mode : typeof p.paymentId === 'string' ? p.paymentId : undefined;
+  return {
+    id: r.id, type: r.type, status: r.status, createdAt: r.createdAt,
+    ...(typeof p.loanId === 'string' && { loanId: p.loanId }),
+    ...(typeof p.amountPaise === 'number' && Number.isInteger(p.amountPaise) && { amountPaise: p.amountPaise }),
+    ...(detail !== undefined && { detail }),
   };
 }
 
@@ -139,6 +157,7 @@ export function toSnapshotView(s: CustomerSnapshot): SnapshotView {
       status: p.status,
       ...(p.failureReason && { note: p.failureReason }),
     })),
+    ...(s.openRequests && { openRequests: s.openRequests }),
     ...(s.partial.length > 0 && { partial: s.partial }),
   };
 }
