@@ -4,7 +4,7 @@ import type { CustomerRecord, Dataset, Interaction, LoanRecord } from './types.j
 
 function buildSchedule(spec: LoanSpec): { schedule: ScheduleRow[]; rateHistory: RateChange[]; emiHistory: EmiChange[]; currentRateBps: number } {
   const baseEmi = emi(spec.principal, spec.rateBps, spec.tenureMonths);
-  const base = amortise({ principal: spec.principal, annualRateBps: spec.rateBps, emi: baseEmi, firstDueDate: spec.firstEmiDate });
+  const base = amortise({ principal: spec.principal, annualRateBps: spec.rateBps, emi: baseEmi, firstDueDate: spec.firstEmiDate, maxMonths: spec.tenureMonths });
   const reset = spec.reset;
   if (!reset) return { schedule: base, rateHistory: [], emiHistory: [], currentRateBps: spec.rateBps };
 
@@ -13,7 +13,7 @@ function buildSchedule(spec: LoanSpec): { schedule: ScheduleRow[]; rateHistory: 
   const outstandingAtReset = old[old.length - 1]!.closing;
   const remainingMonthsAtReset = spec.tenureMonths - old.length;
   const newEmi = emi(outstandingAtReset, reset.newRateBps, remainingMonthsAtReset);
-  const after = amortise({ principal: outstandingAtReset, annualRateBps: reset.newRateBps, emi: newEmi, firstDueDate: reset.firstNewDueDate })
+  const after = amortise({ principal: outstandingAtReset, annualRateBps: reset.newRateBps, emi: newEmi, firstDueDate: reset.firstNewDueDate, maxMonths: remainingMonthsAtReset })
     .map((r) => ({ ...r, n: r.n + old.length }));
   return {
     schedule: [...old, ...after],

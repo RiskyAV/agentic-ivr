@@ -33,6 +33,8 @@ export function amortise(args: {
   maxMonths?: number;
 }): ScheduleRow[] {
   const max = args.maxMonths ?? DEFAULT_MAX_MONTHS;
+  // With an explicit maxMonths the contractual last instalment absorbs the residual.
+  const forceLast = args.maxMonths !== undefined;
   const rows: ScheduleRow[] = [];
   let opening = args.principal;
   const firstInterest = Math.round((opening * args.annualRateBps) / 120_000);
@@ -41,7 +43,7 @@ export function amortise(args: {
   }
   for (let n = 1; n <= max && opening > 0; n++) {
     const interest = Math.round((opening * args.annualRateBps) / 120_000);
-    const last = args.emi >= opening + interest;
+    const last = args.emi >= opening + interest || (forceLast && n === max);
     const rowEmi = last ? opening + interest : args.emi;
     const principal = rowEmi - interest;
     const closing = opening - principal;

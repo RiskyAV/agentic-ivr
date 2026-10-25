@@ -48,3 +48,12 @@ describe('amortise', () => {
     expect(remainingTenure(rupees(100_000), 1200, rupees(500))).toBe(Infinity);
   });
 });
+
+describe('amortise with maxMonths', () => {
+  it('final scheduled instalment absorbs the residual: exactly maxMonths rows ending at 0', () => {
+    const p = rupees(200_000);
+    const rows = amortise({ principal: p, annualRateBps: 1250, emi: emi(p, 1250, 24), firstDueDate: '2025-12-01', maxMonths: 24 });
+    expect(rows).toHaveLength(24);
+    expect(rows[23]!.closing).toBe(0);
+  });
+});

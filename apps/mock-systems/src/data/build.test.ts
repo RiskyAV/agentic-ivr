@@ -76,4 +76,14 @@ describe('buildDataset', () => {
     expect(ds.requests.size).toBe(0);
     expect(DEMO_CUSTOMERS.map((c) => c.id)).toEqual(['C1001', 'C1002', 'C1003', 'C1004']);
   });
+
+  it('every schedule has exactly tenureMonths rows and loan.emi matches the next unpaid row', () => {
+    for (const l of ds.loans.values()) {
+      expect(l.schedule).toHaveLength(l.tenureMonths);
+      const paid = new Set(ds.payments.get(l.loanId)!.filter((p) => p.status === 'success').map((p) => p.paymentId.replace(/-R$/, '')));
+      const next = l.schedule.find((r) => !paid.has(`PAY-${l.loanId}-${r.n}`))!;
+      if (next.n !== l.tenureMonths) expect(l.emi).toBe(next.emi);
+      expect(l.remainingMonths).toBe(l.tenureMonths - paid.size);
+    }
+  });
 });
