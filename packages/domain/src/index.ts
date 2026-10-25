@@ -6,3 +6,4 @@ export * from './finance/emi.js';
 export * from './finance/prepayment.js';
 export * from './finance/foreclosure.js';
 export * from './finance/penal.js';
+export * from './policy/select.js';
