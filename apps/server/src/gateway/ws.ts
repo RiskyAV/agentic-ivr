@@ -24,6 +24,8 @@ interface Conn {
   ws: WebSocket;
   session: Session;
   alive: boolean;
+  /** Set before the socket is closed because a newer connection took over the session. */
+  replaced: boolean;
 }
 
 export interface WsGateway {
@@ -81,7 +83,7 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
   ping.unref();
 
   const send = (c: Conn, m: ServerMsg) => {
-    if (c.ws.readyState === WebSocket.OPEN) c.ws.send(JSON.stringify(m));
+    if (!c.replaced && c.ws.readyState === WebSocket.OPEN) c.ws.send(JSON.stringify(m));
   };
 
   const sinkFor = (c: Conn, turnId: string): TurnSink => ({
@@ -100,6 +102,12 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
     let session = ctx.sessions.get(p.sessionId);
     const resumed = !!session && session.customerId === p.customerId && now - session.lastSeenAt <= RESUME_WINDOW_MS;
     if (!session || !resumed) {
+      if (session) {
+        // Past the resume window: the old session is gone, and so are its open proposals (they must not resurface).
+        const stale = session;
+        stale.activeTurn?.abort.abort();
+        for (const prop of ctx.actions.pending(stale.id)) void ctx.actions.cancel(stale, prop.id).catch(() => {});
+      }
       session = {
         id: p.sessionId, customerId: p.customerId, workflowId: ctx.workflows.list()[0]!.id, history: [], entities: {},
         turnSeq: 0, guardStrikes: 0, pendingProposalIds: [], lastSeenAt: now,
@@ -107,13 +115,14 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
       ctx.sessions.put(session);
     }
     session.lastSeenAt = now;
-    const conn: Conn = { ws, session, alive: true };
+    const conn: Conn = { ws, session, alive: true, replaced: false };
 
     // One socket per session: the newcomer wins, and the old socket's turn is abandoned.
     const old = active.get(p.sessionId);
     active.set(p.sessionId, conn);
     if (old) {
       session.activeTurn?.abort.abort();
+      old.replaced = true;
       old.ws.close(REPLACED_CODE, 'replaced by a newer connection');
     }
 
@@ -160,6 +169,8 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
 
   async function handle(c: Conn, data: unknown, isBinary: boolean) {
     const session = c.session;
+    // A socket that lost the session (replaced or closed) must not drive it, even with messages already queued.
+    if (c.replaced || active.get(session.id) !== c) return;
     session.lastSeenAt = ctx.now();
     if (isBinary) return err(c, 'voice_unavailable', 'Voice is not available yet.');
     let msg: ClientMsg;
@@ -240,8 +251,18 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
       ctx.connectors.invalidate('lms', `lms:schedule:${loanId}`);
       ctx.connectors.invalidate('payments', `payments:list:${loanId}`);
     }
-    session.snapshot = await loadSnapshot(ctx.connectors, cid, { signal: AbortSignal.timeout(10_000) });
-    send(c, { type: 'snapshot', snapshot: toSnapshotView(session.snapshot) });
+    // The result is already sent; a failed reload must not turn a successful action into an error.
+    try {
+      const fresh = await loadSnapshot(ctx.connectors, cid, { signal: AbortSignal.timeout(10_000) });
+      if (fresh.partial.length > 0 && session.snapshot) {
+        console.warn('[ws] snapshot reload after execution was partial; keeping the previous one');
+        return;
+      }
+      session.snapshot = fresh;
+      send(c, { type: 'snapshot', snapshot: toSnapshotView(fresh) });
+    } catch (e) {
+      console.warn('[ws] snapshot reload after execution failed', (e as Error).message);
+    }
   }
 
   return {

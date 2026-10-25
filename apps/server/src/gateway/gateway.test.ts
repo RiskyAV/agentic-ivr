@@ -260,6 +260,73 @@ describe('WebSocket', () => {
     await c2.close();
   });
 
+  it('a replaced socket cannot drive the session, even with a message in flight', async () => {
+    const { body } = await login('C1001');
+    const a = await new Client(body.token).ready();
+    const b = new Client(body.token);
+    await b.waitFor('session_ready');
+    await b.waitFor('snapshot');
+    // A may still look open to the client; send as late as possible, ignoring a failed send.
+    a.ws.send(JSON.stringify({ type: 'user_text', turnId: 'late', text: 'why did my EMI go up' }), () => {});
+    expect(await a.closed()).toBe(4001);
+    await new Promise((r) => setTimeout(r, 300));
+    for (const c of [a, b]) {
+      expect(c.msgs.some((m) => m.type === 'turn_start' || m.type === 'assistant_delta')).toBe(false);
+    }
+    const sess = gw.sessions.get(body.sessionId)!;
+    expect(sess.history).toEqual([]);
+    await b.close();
+  });
+
+  it('an idle-expired session cancels its pending proposals and starts clean', async () => {
+    let t = Date.now();
+    const s = await startApp(testConfig(), { now: () => t });
+    const { body } = await login('C1001', {}, s.base);
+    const c1 = await new Client(body.token, s.wsBase).ready();
+    c1.send({ type: 'user_text', turnId: 'x', text: 'prepay 50k' });
+    const prop = await c1.waitFor('action_proposal');
+    await c1.waitFor('assistant_done');
+    await c1.close();
+    await new Promise((r) => setTimeout(r, 50));
+    t += 6 * 60_000;
+    const c2 = new Client(body.token, s.wsBase);
+    const ready = await c2.waitFor('session_ready');
+    await c2.waitFor('snapshot');
+    expect(ready.resumed).toBe(false);
+    expect(ready.history).toEqual([]);
+    c2.send({ type: 'confirm_action', proposalId: prop.proposal.id, termsHash: prop.proposal.termsHash });
+    const res = await c2.waitFor('action_result');
+    expect(res.status).toBe('rejected');
+    const audit = s.h.ctx.audit.list(50).filter((e) => e.proposalId === prop.proposal.id).map((e) => e.event);
+    expect(audit).toContain('cancelled');
+    expect(audit).not.toContain('executed');
+    await c2.close();
+  });
+
+  it('a failing snapshot reload after execution does not send an error', async () => {
+    const s = await startApp(testConfig());
+    const { body } = await login('C1001', {}, s.base);
+    const c = await new Client(body.token, s.wsBase).ready();
+    c.send({ type: 'user_text', turnId: 'x', text: 'prepay 50k' });
+    const prop = await c.waitFor('action_proposal');
+    await c.waitFor('assistant_done');
+    // The backend dies right after the action commits: only the post-execution reload fails.
+    const lms = s.h.ctx.connectors.lms;
+    const ops = s.h.ctx.connectors.ops;
+    const realGetLoans = lms.getLoans.bind(lms);
+    const realCreate = ops.create.bind(ops);
+    let committed = false;
+    ops.create = async (...args) => { const r = await realCreate(...args); committed = true; return r; };
+    lms.getLoans = async (...args) => { if (committed) throw new Error('lms down'); return realGetLoans(...args); };
+    c.send({ type: 'confirm_action', proposalId: prop.proposal.id, termsHash: prop.proposal.termsHash });
+    const res = await c.waitFor('action_result');
+    expect(res.status).toBe('executed');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(c.msgs.filter((m) => m.type === 'error')).toEqual([]);
+    expect(c.msgs.filter((m) => m.type === 'snapshot')).toHaveLength(1); // only the initial one
+    await c.close();
+  });
+
   it('(e) another customer cannot confirm a proposal; the owner can, once', async () => {
     const rahul = await login('C1001');
     const priya = await login('C1002');
