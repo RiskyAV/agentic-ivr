@@ -4,9 +4,11 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@app/shared": "*",
     "@app/domain": "*",
-    "fastify": "^5.12.7"
+    "@app/shared": "*",
+    "fastify": "^5.12.7",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
     "@app/mock-systems": "*"
