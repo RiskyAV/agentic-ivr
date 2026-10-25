@@ -24,6 +24,8 @@ export interface LoanCardView {
   remainingMonths: number;
   overduePaise: number;
   maskedAccount: string;
+  daysPastDue?: number;
+  lastPayment?: { date: string; amount: number; status: string };
 }
 
 export interface PaymentRowView {
@@ -41,6 +43,8 @@ export interface SnapshotView {
   asOf: string;
   loans: LoanCardView[];
   recentPayments: PaymentRowView[];
+  /** Systems that failed while loading the snapshot. */
+  partial?: SystemName[];
 }
 
 export interface ProposalView {

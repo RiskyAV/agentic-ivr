@@ -3,5 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "dependencies": { "@app/shared": "*", "@app/domain": "*" }
+  "dependencies": {
+    "@app/shared": "*",
+    "@app/domain": "*",
+    "fastify": "^5.12.7"
+  },
+  "devDependencies": {
+    "@app/mock-systems": "*"
+  }
 }
