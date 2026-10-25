@@ -32,4 +32,10 @@ describe('TurnTracer', () => {
     expect(trace.spans.some((s) => s.name === 'backend:crm')).toBe(true);
     expect(trace.spans.some((s) => s.name === 'first_token')).toBe(true);
   });
+  it('redacts PII in span attrs', () => {
+    const tr = new TurnTracer('t', 'text');
+    const end = tr.span('x', { phone: '9876543210' });
+    end({ email: 'a@b.in' });
+    expect(tr.toTrace().spans[0]!.attrs).toEqual({ phone: 'XXXXXX3210', email: 'XXXXXXb.in' });
+  });
 });

@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { redact } from '../context/redact.js';
 
 export type LoggedEvent =
   | { type: 'user_input'; at: number; text: string; turnId?: string; channel?: string }
@@ -23,7 +24,7 @@ export class EventLog {
 
   append(sessionId: string, ev: LoggedEvent): void {
     mkdirSync(this.dir, { recursive: true });
-    appendFileSync(this.file(sessionId), JSON.stringify(ev) + '\n');
+    appendFileSync(this.file(sessionId), JSON.stringify(redact(ev)) + '\n');
   }
 
   read(sessionId: string): LoggedEvent[] {

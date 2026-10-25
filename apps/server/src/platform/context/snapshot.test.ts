@@ -30,11 +30,27 @@ describe('loadSnapshot', () => {
     expect(s.partial).toEqual(['crm']);
     expect(s.loans).toHaveLength(2);
   }, 10_000);
-  it('overdue customer C1003 has overdue amount and days past due', async () => {
+  it('overdue customer C1003: pending payments summed, days from oldest', async () => {
     const s = await loadSnapshot(setup(), 'C1003', ctx());
     const l = s.loans[0]!;
-    expect(l.overdueAmount).toBeGreaterThan(0);
-    expect(l.daysPastDue).toBeGreaterThan(0);
+    expect(l.overdueAmount).toBe(2 * l.emi);
+    expect(l.overdueAmount).toBe(2_880_800);
+    expect(l.daysPastDue).toBe(40);
+  });
+  it('C1001 has no overdue', async () => {
+    const s = await loadSnapshot(setup(), 'C1001', ctx());
+    expect(s.loans[0]!.overdueAmount).toBe(0);
+    expect(s.loans[0]!.daysPastDue).toBe(0);
+  });
+  it('C1002 view has recent payments incl. a failed row; lastPayment is a success', async () => {
+    const s = await loadSnapshot(setup(), 'C1002', ctx());
+    expect(s.loans[0]!.lastPayment?.status).toBe('success');
+    const v = toSnapshotView(s);
+    expect(v.recentPayments.length).toBeGreaterThan(0);
+    expect(v.recentPayments.length).toBeLessThanOrEqual(5);
+    expect(v.recentPayments.some((p) => p.status === 'failed')).toBe(true);
+    const dates = v.recentPayments.map((p) => p.date);
+    expect(dates).toEqual([...dates].sort().reverse());
   });
   it('healthy loan has zero overdue', async () => {
     const s = await loadSnapshot(setup(), 'C1004', ctx());

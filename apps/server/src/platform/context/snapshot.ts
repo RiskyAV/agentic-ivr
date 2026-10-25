@@ -1,13 +1,21 @@
-import { addMonths, daysBetween, today, type Paise, type ProductType, type RateType } from '@app/domain';
+import { daysBetween, today, type Paise, type ProductType, type RateType } from '@app/domain';
 import type { LoanCardView, SnapshotView, SystemName } from '@app/shared';
 import type { CallCtx, Connectors } from '../connectors/clients.js';
-import type { CrmCustomer, LoanRecordDto } from '../connectors/types.js';
+import type { CrmCustomer, LoanRecordDto, PaymentDto } from '../connectors/types.js';
 import { redact } from './redact.js';
 
 export interface LastPayment {
   date: string;
   amount: Paise;
   status: 'success' | 'failed' | 'pending';
+}
+export interface RecentPayment {
+  loanId: string;
+  date: string;
+  amount: Paise;
+  status: 'success' | 'failed' | 'pending';
+  paymentId?: string;
+  failureReason?: string;
 }
 export interface LoanSummary {
   loanId: string;
@@ -32,16 +40,18 @@ export interface CustomerSnapshot {
   /** PII already masked. Absent when CRM was unavailable. */
   customer?: CrmCustomer;
   loans: LoanSummary[];
+  /** Most recent 5 payment rows across all loans, newest first. */
+  recentPayments: RecentPayment[];
   fetchedAt: string;
   partial: SystemName[];
 }
 
-/** Overdue = every monthly instalment from nextDueDate that fell strictly before today. */
-function overdue(nextDueDate: string | undefined, emi: Paise, on: string): { amount: Paise; days: number } {
-  if (!nextDueDate || nextDueDate >= on) return { amount: 0, days: 0 };
-  let n = 0;
-  while (addMonths(nextDueDate, n) < on) n++;
-  return { amount: n * emi, days: daysBetween(nextDueDate, on) };
+/** Overdue = pending payments due on or before today; days past due runs from the oldest such date. */
+function overdue(pays: PaymentDto[], on: string): { amount: Paise; days: number } {
+  const due = pays.filter((p) => p.status === 'pending' && p.date <= on);
+  if (due.length === 0) return { amount: 0, days: 0 };
+  const oldest = due.map((p) => p.date).sort()[0]!;
+  return { amount: due.reduce((t, p) => t + p.amount, 0), days: Math.max(0, daysBetween(oldest, on)) };
 }
 
 export async function loadSnapshot(c: Connectors, customerId: string, ctx: CallCtx): Promise<CustomerSnapshot> {
@@ -52,14 +62,17 @@ export async function loadSnapshot(c: Connectors, customerId: string, ctx: CallC
   if (!loansRes.ok) partial.add('lms');
 
   const base = loansRes.ok ? loansRes.data : [];
+  const allPays: PaymentDto[] = [];
   const loans = await Promise.all(
     base.map(async (s): Promise<LoanSummary> => {
       const [detail, pays] = await Promise.all([c.lms.getLoan(s.loanId, ctx), c.payments.list(s.loanId, {}, ctx)]);
       if (!detail.ok) partial.add('lms');
       if (!pays.ok) partial.add('payments');
       const l: LoanRecordDto = detail.ok ? detail.data : s;
-      const last = pays.ok ? pays.data.filter((p) => p.date <= on).sort((a, b) => b.date.localeCompare(a.date))[0] : undefined;
-      const od = overdue(l.nextDueDate, l.emi, on);
+      const list = pays.ok ? pays.data : [];
+      allPays.push(...list);
+      const last = list.filter((p) => p.status === 'success' && p.date <= on).sort((a, b) => b.date.localeCompare(a.date))[0];
+      const od = overdue(list, on);
       return {
         loanId: l.loanId,
         product: l.product,
@@ -83,6 +96,14 @@ export async function loadSnapshot(c: Connectors, customerId: string, ctx: CallC
     customerId,
     ...(cust.ok && { customer: redact(cust.data) }),
     loans,
+    recentPayments: allPays
+      .filter((p) => p.date <= on)
+      .sort((a, b) => b.date.localeCompare(a.date) || b.paymentId.localeCompare(a.paymentId))
+      .slice(0, 5)
+      .map((p) => ({
+        loanId: p.loanId, date: p.date, amount: p.amount, status: p.status, paymentId: p.paymentId,
+        ...(p.failureReason && { failureReason: p.failureReason }),
+      })),
     fetchedAt: new Date().toISOString(),
     partial: [...partial],
   };
@@ -110,7 +131,14 @@ export function toSnapshotView(s: CustomerSnapshot): SnapshotView {
     customer: { id: s.customerId, name: s.customer?.name ?? '' },
     asOf: s.fetchedAt,
     loans: cards,
-    recentPayments: [],
+    recentPayments: s.recentPayments.map((p) => ({
+      paymentId: p.paymentId ?? `${p.loanId}:${p.date}`,
+      loanId: p.loanId,
+      date: p.date,
+      amountPaise: p.amount,
+      status: p.status,
+      ...(p.failureReason && { note: p.failureReason }),
+    })),
     ...(s.partial.length > 0 && { partial: s.partial }),
   };
 }

@@ -1,4 +1,5 @@
 import type { Channel, SpanView, TurnTrace } from '@app/shared';
+import { redact } from '../context/redact.js';
 import type { CallEvent, CallObserver } from '../connectors/resilientClient.js';
 
 type Attrs = Record<string, string | number | boolean>;
@@ -22,14 +23,14 @@ export class TurnTracer {
   }
 
   span(name: string, attrs?: Attrs): (endAttrs?: Attrs) => void {
-    const span: SpanView = { name, startMs: this.rel(), endMs: this.rel(), ...(attrs && { attrs: { ...attrs } }) };
+    const span: SpanView = { name, startMs: this.rel(), endMs: this.rel(), ...(attrs && { attrs: redact(attrs) }) };
     this.spans.push(span);
     let ended = false;
     return (endAttrs) => {
       if (ended) return;
       ended = true;
       span.endMs = this.rel();
-      if (endAttrs) span.attrs = { ...span.attrs, ...endAttrs };
+      if (endAttrs) span.attrs = { ...span.attrs, ...redact(endAttrs) };
     };
   }
 

@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -23,5 +23,12 @@ describe('EventLog', () => {
     log.append('../../evil', { type: 'timing', at: 1, metrics: {} });
     expect(readdirSync(dir).every((f) => f.endsWith('.jsonl') && !f.includes('/'))).toBe(true);
     expect(log.read('../../evil')).toHaveLength(1);
+  });
+  it('redacts PII before it reaches disk', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ev-'));
+    const log = new EventLog(dir);
+    log.append('s2', { type: 'backend_call', at: 1, system: 'crm', method: 'GET', path: '/x', status: 200, body: { pan: 'ABCDE1234F' } });
+    expect((log.read('s2')[0] as { body: { pan: string } }).body.pan).toBe('XXXXXX234F');
+    expect(readFileSync(join(dir, 's2.jsonl'), 'utf8')).not.toContain('ABCDE1234F');
   });
 });
