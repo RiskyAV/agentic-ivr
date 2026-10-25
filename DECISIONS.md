@@ -81,22 +81,25 @@ Status: `Accepted` = agreed, `Proposed` = suggested but not yet confirmed, `Supe
 - **Decision:** Promise-to-pay and payment-link generation are proposed by the LLM and executed only after the customer confirms, exactly like the loan-servicing actions.
 - **Why:** One action model across workflows is part of the platform claim, and it keeps the security guarantee uniform: the LLM never executes anything on its own.
 
-## D-014 — Full-duplex streaming at every hop, with speculative LLM start
+## D-014 — Full-duplex streaming at every hop (no speculative LLM start)
 - **Date:** 2026-10-25 · **Status:** Accepted
-- **Decision:** Nothing in the voice path waits for a complete payload. Every hop is a stream over a persistent socket:
+- **Decision:** Nothing in the voice path waits for a complete payload, except the user's transcript. Every hop is a stream over a persistent socket:
   1. **Browser → server:** mic audio leaves as 20–40 ms PCM chunks over our WebSocket while the user is still speaking.
-  2. **Server → ElevenLabs STT:** chunks are forwarded straight to the Scribe realtime socket. Partial transcripts come back continuously and are shown as live captions.
-  3. **STT → LLM (speculative start):** when the partial transcript is stable and about 300 ms of silence is detected, the LLM turn starts **before** the STT commits the final transcript. If the committed transcript differs materially, the speculative turn is aborted and restarted. Speculative turns may only call **read-only tools**: they have no side effects, so discarding them is safe. Actions are never proposed speculatively.
+  2. **Server → ElevenLabs STT:** chunks are forwarded straight to the Scribe realtime socket. Partial transcripts come back continuously and are shown as live captions only.
+  3. **STT → LLM:** the LLM turn starts on the **committed (final) transcript**. The STT's end-of-turn silence threshold is tuned short (about 400–500 ms, configurable) to keep that gap small.
   4. **LLM → TTS:** Gemini's token stream is cut at clause boundaries, and each clause goes into the ElevenLabs streaming-input TTS socket immediately. The first chunk is sent early, at the first clause or about 40 characters, and the stream is flushed at the end.
   5. **TTS → browser:** audio chunks are forwarded as they arrive, played through a small jitter buffer, and kept in sync with the on-screen text.
 - **Supporting latency tactics:**
   - The customer snapshot is prefetched at session start, so simple questions need no tool calls.
   - Read tools run in parallel.
   - Filler speech plays while slow tools run.
-  - Sockets to STT and TTS are opened when the voice session starts (pre-warmed), so the connection cost isn't paid on each turn.
-- **Why:** In a voice conversation, perceived speed is the time from the end of user speech to the first assistant audio. Streaming every hop turns that into the *time to the first token/clause* at each stage, instead of the sum of full completion times. The speculative start removes STT finalisation from the critical path.
-- **Trade-off:**
-  - More complexity: cancellation has to be clean at every hop, which barge-in needs anyway.
-  - Some wasted LLM tokens when a speculative turn is discarded.
-  - Clause-level TTS chunks can slightly flatten prosody compared with sending whole sentences.
-- **Measured:** the trace records each hop (first partial, speculative start/abort, LLM first token, first TTS chunk sent, first audio played), so the gain shows up in the latency report.
+  - The STT and TTS sockets are pre-warmed when voice mode starts.
+- **Why:** In a voice conversation, perceived speed is the time from the end of user speech to the first assistant audio. Streaming every hop turns that into the *time to the first token/clause* at each stage, instead of the sum of full completion times.
+- **Rejected: speculative LLM start on partial transcripts** (a.k.a. preemptive generation).
+  - Gemini's standard API can't take incremental input, so each transcript change means a fresh request that repeats prompt processing.
+  - The saving is only about 100–300 ms, which mostly comes for free from tuning the STT silence threshold.
+  - Partial transcripts are exactly where amounts change ("fifty" vs "fifteen" thousand). A restart costs more than speculation saves, and a missed restart answers the wrong number, which breaks the accuracy promise.
+  - Mid-sentence pauses cause abort churn and extra backend reads.
+  - It's kept as a possible future optimisation, to be adopted only if measurements show STT finalisation dominating latency.
+- **Trade-off:** We accept STT finalisation time on the critical path in exchange for correctness and simpler cancellation. Clause-level TTS chunks can slightly flatten prosody compared with sending whole sentences.
+- **Measured:** the trace records each hop (first partial, STT commit, LLM first token, first TTS chunk sent, first audio played), so the latency report shows where the time goes.
