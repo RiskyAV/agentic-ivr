@@ -9,6 +9,7 @@ export class TurnTracer {
   private readonly spans: SpanView[] = [];
   private readonly metrics: Record<string, number> = {};
   guard?: TurnTrace['guard'];
+  private readonly callListeners: Array<(e: CallEvent) => void> = [];
 
   constructor(
     readonly turnId: string,
@@ -43,9 +44,17 @@ export class TurnTracer {
     this.metrics[name] = value;
   }
 
+  /** Extra subscriber for every observed backend call (the engine logs them for replay, D-023). */
+  onCall(fn: (e: CallEvent) => void): void {
+    this.callListeners.push(fn);
+  }
+
   /** Each backend call becomes a `backend:<system>` span ending now and starting `ms` earlier. */
   readonly observer: CallObserver = {
     onCall: (e: CallEvent) => {
+      for (const fn of this.callListeners) {
+        try { fn(e); } catch { /* telemetry must never break a call */ }
+      }
       const end = this.rel();
       this.spans.push({
         name: `backend:${e.system}`,

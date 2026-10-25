@@ -4,13 +4,13 @@ import { redact } from '../context/redact.js';
 
 export type LoggedEvent =
   | { type: 'user_input'; at: number; text: string; turnId?: string; channel?: string }
-  | { type: 'llm_request'; at: number; promptHash: string; turnId?: string }
-  | { type: 'llm_response'; at: number; chunks: string[]; turnId?: string }
+  | { type: 'llm_request'; at: number; promptHash: string; prefixHash?: string; model?: string; round?: number; turnId?: string }
+  | { type: 'llm_response'; at: number; chunks: unknown[]; usage?: unknown; round?: number; turnId?: string }
   | { type: 'backend_call'; at: number; system: string; method: string; path: string; status?: number; body?: unknown; turnId?: string }
-  | { type: 'guard'; at: number; verdict: string; category?: string; turnId?: string }
+  | { type: 'guard'; at: number; verdict: string; category?: string; by?: string; ms?: number; turnId?: string }
   | { type: 'proposal'; at: number; proposalId: string; actionType: string; termsHash: string; turnId?: string }
   | { type: 'confirm'; at: number; proposalId: string; outcome: string; reference?: string; turnId?: string }
-  | { type: 'assistant_final'; at: number; text: string; turnId?: string }
+  | { type: 'assistant_final'; at: number; text: string; sources?: unknown[]; unverified?: string[]; status?: string; turnId?: string }
   | { type: 'timing'; at: number; metrics: Record<string, number>; turnId?: string };
 
 /** Append-only JSONL per session. appendFileSync keeps writes ordered; the dir is created on demand. */

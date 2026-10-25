@@ -17,6 +17,8 @@ export interface ClientConfig {
 export interface CallEvent {
   system: SystemName;
   key: string;
+  method?: 'GET' | 'POST';
+  path?: string;
   attempt: number;
   hedged: boolean;
   ms: number;
@@ -118,7 +120,7 @@ export class ResilientClient {
     const key = ctx.cacheKey ?? path;
     const isGet = method === 'GET';
     const started = this.now();
-    const emit = (e: Omit<CallEvent, 'system' | 'key'>) => ctx.observer?.onCall({ system: this.system, key, ...e });
+    const emit = (e: Omit<CallEvent, 'system' | 'key'>) => ctx.observer?.onCall({ system: this.system, key, method, path, ...e });
 
     const admit = this.admit();
     if (admit === 'open') {
@@ -274,7 +276,7 @@ export class ResilientClient {
       ctx.signal.removeEventListener('abort', onCaller);
       if (raw.kind === 'aborted' || cancelled) return raw;
       const ms = this.now() - t0;
-      const ev = { attempt, hedged, ms };
+      const ev = { method: req.method, path: req.path, attempt, hedged, ms };
       switch (raw.kind) {
         case 'ok':
           this.samples.push(ms);
