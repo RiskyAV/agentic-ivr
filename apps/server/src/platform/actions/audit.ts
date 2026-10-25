@@ -1,6 +1,6 @@
 import { redact } from '../context/redact.js';
 
-export type AuditEventType = 'proposed' | 'confirmed' | 'executed' | 'rejected' | 'failed' | 'cancelled' | 'expired';
+export type AuditEventType = 'proposed' | 'confirmed' | 'executed' | 'rejected' | 'failed' | 'cancelled' | 'expired' | 'guard_escalation';
 
 export interface AuditEntry {
   at: number;

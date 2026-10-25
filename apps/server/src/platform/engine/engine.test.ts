@@ -7,7 +7,7 @@ import { ActionService } from '../actions/actionService.js';
 import { AuditLog } from '../actions/audit.js';
 import { loadSnapshot } from '../context/snapshot.js';
 import type { Session } from '../context/session.js';
-import type { Guard, GuardVerdict } from '../guard/types.js';
+import type { Guard, GuardContext, GuardVerdict } from '../guard/types.js';
 import { Limiter } from '../llm/limiter.js';
 import { StubLlm, type StubRule } from '../llm/stub.js';
 import type { LlmChunk, LlmRequest } from '../llm/types.js';
@@ -63,6 +63,7 @@ async function setup(opts: {
   chunkDelayMs?: number;
   llm?: { stream(req: LlmRequest, signal: AbortSignal): AsyncIterable<LlmChunk> };
   guardWaitMs?: number;
+  demoCustomerNames?: string[];
   extraWorkflows?: WorkflowDefinition[];
 }) {
   const h = makeHarness(opts.chaos ?? {});
@@ -82,6 +83,8 @@ async function setup(opts: {
     limiter: opts.limiter ?? new Limiter(10, 1000),
     tools, actions, workflows, connectors: h.connectors, eventLog, metrics,
     ...(opts.guard && { guard: opts.guard }),
+    ...(opts.demoCustomerNames && { demoCustomerNames: opts.demoCustomerNames }),
+    audit,
     config: { turnBudgetMs: opts.turnBudgetMs ?? 9000, maxToolRounds: 4, toolTimeoutMs: 4000, ...(opts.guardWaitMs && { guardWaitMs: opts.guardWaitMs }) },
   });
   const session: Session = makeSession(opts.customerId ?? 'C1001');
@@ -319,6 +322,31 @@ describe('Engine.runTurn', () => {
     expect(s.actions.pending(s.session.id)).toHaveLength(0);
     expect(s.audit.list(10).map((e) => e.event)).toContain('cancelled');
     expect(s.session.pendingProposalIds).toHaveLength(0);
+  });
+
+  it('passes owned loan ids and other demo customers (not the current one) to the guard', async () => {
+    let seen: GuardContext | undefined;
+    const guard: Guard = { check: async (_t, c) => { seen = c; return { verdict: 'allow', by: 'rules', ms: 1 }; } };
+    const s = await setup({ rules: [], guard, demoCustomerNames: ['Rahul Mehta', 'Priya Sharma'] });
+    await s.engine.runTurn(s.session, { turnId: 't1', text: 'hello', channel: 'text' }, recorder().sink);
+    expect(seen!.ownedLoanIds).toEqual(s.session.snapshot!.loans.map((l) => l.loanId));
+    expect(seen!.ownedLoanIds!.length).toBeGreaterThan(0);
+    expect(seen!.otherCustomerNames).toEqual(['Priya Sharma']);
+  });
+
+  it('audits guard_escalation from the second strike, not the first', async () => {
+    const guard: Guard = { check: async () => ({ verdict: 'block', category: 'cross_customer', by: 'rules', ms: 1 }) };
+    const s = await setup({ rules: [], guard });
+    const r1 = recorder();
+    await s.engine.runTurn(s.session, { turnId: 't1', text: 'x', channel: 'text' }, r1.sink);
+    expect(s.audit.list(10).filter((e) => e.event === 'guard_escalation')).toHaveLength(0);
+    const r2 = recorder();
+    await s.engine.runTurn(s.session, { turnId: 't2', text: 'y', channel: 'text' }, r2.sink);
+    const esc = s.audit.list(10).filter((e) => e.event === 'guard_escalation');
+    expect(esc).toHaveLength(1);
+    expect(esc[0]).toMatchObject({ sessionId: s.session.id, detail: { category: 'cross_customer', strikes: 2, turnId: 't2' } });
+    expect(r2.of('done')[0]!.v.text).toMatch(/member of our team/);
+    expect(r1.of('done')[0]!.v.text).toBe('I can only help with your own accounts.');
   });
 
   it('a guard that never answers lets the text through but drops proposals', async () => {

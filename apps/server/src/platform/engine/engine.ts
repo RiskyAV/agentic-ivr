@@ -10,6 +10,8 @@ import { loadSnapshot, type CustomerSnapshot } from '../context/snapshot.js';
 import { numericCheck } from '../grounding/numericCheck.js';
 import { PlaceholderRenderer } from '../grounding/renderer.js';
 import { formatBound, type BoundValue } from '../grounding/values.js';
+import type { AuditLog } from '../actions/audit.js';
+import { refusalFor } from '../guard/refusal.js';
 import type { Guard, GuardVerdict, RefusalFn } from '../guard/types.js';
 import { LimiterTimeout, type Limiter } from '../llm/limiter.js';
 import type { LlmChunk, LlmClient, LlmMessage, LlmRequest, ToolCall } from '../llm/types.js';
@@ -60,6 +62,10 @@ export interface EngineDeps {
   refusal?: RefusalFn;
   /** Names of other customers the guard should watch for (cross-customer probing). */
   otherCustomerNames?: (customerId: string) => string[];
+  /** Names of all demo customers; the current customer's own name is filtered out before the guard sees them. */
+  demoCustomerNames?: string[];
+  /** Receives `guard_escalation` entries when a block happens at 2+ strikes. */
+  audit?: AuditLog;
   config: EngineConfig;
 }
 
@@ -72,10 +78,7 @@ export const PROPOSAL_DROPPED_NOTE = "(I couldn't finalise that request just now
 /** Bounded wait for a guard verdict when a turn ends early (abort or error), before its input is stored in history. */
 const EARLY_GUARD_WAIT_MS = 800;
 
-export const defaultRefusal: RefusalFn = (_category, strikes) =>
-  strikes >= 3
-    ? "I can't help with that. If you need anything else on your loan, I can connect you with our support team."
-    : "I'm sorry, I can only help with questions about your own loan account.";
+export const defaultRefusal: RefusalFn = refusalFor;
 
 export function engineConfigFromEnv(env: Record<string, string | undefined> = process.env): EngineConfig {
   const budget = Number(env.TURN_BUDGET_MS);
@@ -226,7 +229,15 @@ export class Engine {
       verdict = v;
       tracer.guard = { verdict: v.by === 'timeout' ? 'timeout' : v.verdict, ...(v.category && { category: v.category }), ms: v.ms };
       log({ type: 'guard', verdict: v.verdict, by: v.by, ms: v.ms, ...(v.category && { category: v.category }) });
-      if (v.verdict === 'block') session.guardStrikes++;
+      if (v.verdict === 'block') {
+        session.guardStrikes++;
+        if (session.guardStrikes >= 2) {
+          this.deps.audit?.append({
+            at: Date.now(), sessionId: session.id, customerId: session.customerId, event: 'guard_escalation', proposalId: '',
+            detail: { turnId: input.turnId, category: v.category ?? null, by: v.by, strikes: session.guardStrikes },
+          });
+        }
+      }
     };
     /** Waits (bounded) for the verdict if none is recorded yet; a missing guard verdict counts as allow. */
     const settleVerdict = async (waitMs: number, abortable: boolean) => {
@@ -284,7 +295,12 @@ export class Engine {
       guardP = this.deps.guard
         ?.check(
           input.text,
-          { customerName: snapshot.customer?.name ?? '', otherCustomerNames: this.deps.otherCustomerNames?.(session.customerId) ?? [], strikes: session.guardStrikes },
+          {
+            customerName: snapshot.customer?.name ?? '',
+            otherCustomerNames: this.otherNames(session.customerId, snapshot.customer?.name),
+            ownedLoanIds: snapshot.loans.map((l) => l.loanId),
+            strikes: session.guardStrikes,
+          },
           guardCtl.signal,
         )
         .catch(() => null);
@@ -450,6 +466,12 @@ export class Engine {
       guardCtl.abort();
       if (held.length > 0) await cancelHeld();
     }
+  }
+
+  private otherNames(customerId: string, ownName?: string): string[] {
+    const own = ownName?.trim().toLowerCase();
+    const all = [...(this.deps.otherCustomerNames?.(customerId) ?? []), ...(this.deps.demoCustomerNames ?? [])];
+    return [...new Set(all)].filter((n) => n.trim().toLowerCase() !== own);
   }
 
   private async runTools(
