@@ -39,6 +39,10 @@ export type ServerMsg =
       status: 'executed' | 'rejected' | 'failed' | 'expired';
       reference?: string;
       message: string;
+      /** Machine-readable cause, e.g. `execution_uncertain`, `hash_mismatch`. */
+      reason?: string;
+      /** True when the proposal is still pending server-side and confirming again is safe (no duplicate). */
+      retryable?: boolean;
     }
   | { type: 'tts_begin'; turnSeq: number; turnId: string }
   | { type: 'tts_end'; turnSeq: number }

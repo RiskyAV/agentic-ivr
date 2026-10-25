@@ -54,6 +54,19 @@ export function historyView(session: Session, ctx: Pick<GatewayCtx, 'actions'>):
   return items;
 }
 
+/** Failures after which the proposal stays pending (D-040), so a re-confirm is safe. */
+const RETRYABLE_REASONS = new Set(['execution_uncertain', 'validation_unavailable']);
+
+export function actionResultMsg(proposalId: string, o: ActionOutcome): Extract<ServerMsg, { type: 'action_result' }> {
+  // The wire protocol has no "cancelled" status; a cancelled or closed request is reported as rejected.
+  const status = o.status === 'cancelled' ? 'rejected' : o.status;
+  return {
+    type: 'action_result', proposalId, status, ...(o.reference && { reference: o.reference }), message: o.message,
+    ...(o.reason && { reason: o.reason }),
+    ...(o.status === 'failed' && o.reason !== undefined && RETRYABLE_REASONS.has(o.reason) && { retryable: true }),
+  };
+}
+
 export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
   /** One active socket per session. */
@@ -226,9 +239,7 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
   }
 
   function sendResult(c: Conn, proposalId: string, o: ActionOutcome) {
-    // The wire protocol has no "cancelled" status; a cancelled or closed request is reported as rejected.
-    const status = o.status === 'cancelled' ? 'rejected' : o.status;
-    send(c, { type: 'action_result', proposalId, status, ...(o.reference && { reference: o.reference }), message: o.message });
+    send(c, actionResultMsg(proposalId, o));
   }
 
   async function confirm(c: Conn, proposalId: string, termsHash: string) {

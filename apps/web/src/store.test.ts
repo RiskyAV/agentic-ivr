@@ -55,6 +55,18 @@ describe('store reducer', () => {
     expect(s.pendingProposals).toEqual([]);
   });
 
+  it('a failed result keeps the card confirmable only when retryable is true (message text is ignored)', () => {
+    let s = run([{ type: 'action_proposal', proposal }]);
+    s = localConfirming(s, 'P1');
+    s = reduce(s, { type: 'action_result', proposalId: 'P1', status: 'failed', reason: 'execution_uncertain', retryable: true, message: 'Could not confirm it went through.' });
+    expect(s.items.at(-1)).toMatchObject({ status: 'pending', message: 'Could not confirm it went through.' });
+    expect(s.pendingProposals).toEqual(['P1']);
+    s = localConfirming(s, 'P1');
+    s = reduce(s, { type: 'action_result', proposalId: 'P1', status: 'failed', retryable: false, message: 'You can safely retry later.' });
+    expect(s.items.at(-1)).toMatchObject({ status: 'failed' });
+    expect(s.pendingProposals).toEqual([]);
+  });
+
   it('a pending proposal past its expiry becomes expired locally, but never overrides an executed one', () => {
     let s = run([{ type: 'action_proposal', proposal }]);
     s = localExpire(s, 'P1');

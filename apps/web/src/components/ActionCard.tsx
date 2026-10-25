@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Ban, CheckCircle2, Clock3, Loader2, ShieldCheck, XCircle } from 'lucide-react';
 import type { ChatItem } from '../store';
 import { useStore } from '../store';
@@ -37,8 +37,12 @@ export function ActionCard({ item }: { item: ProposalItem }) {
     if (status === 'pending' && left <= 0) expire(p.id);
   }, [left, status, p.id, expire]);
 
+  // Synchronous guard: a double click lands before the 'confirming' re-render disables the button.
+  const sent = useRef(false);
+  useEffect(() => { if (status === 'pending') sent.current = false; }, [status]);
   const confirm = () => {
-    if (socket.send({ type: 'confirm_action', proposalId: p.id, termsHash: p.termsHash })) confirming(p.id);
+    if (sent.current) return;
+    if (socket.send({ type: 'confirm_action', proposalId: p.id, termsHash: p.termsHash })) { sent.current = true; confirming(p.id); }
   };
   const cancel = () => { socket.send({ type: 'cancel_action', proposalId: p.id }); };
 

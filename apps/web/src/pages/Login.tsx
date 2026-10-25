@@ -80,7 +80,7 @@ export function Login({ onSignedIn }: { onSignedIn: (s: StoredSession) => void }
                   return (
                     <label
                       key={c.id}
-                      className={`group relative flex cursor-pointer gap-3 rounded-xl border p-4 transition ${on ? 'border-teal-500 bg-teal-50/40 ring-1 ring-teal-500' : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'}`}
+                      className={`group relative flex cursor-pointer gap-3 rounded-xl border p-4 transition focus-within:ring-2 focus-within:ring-teal-500 focus-within:ring-offset-2 ${on ? 'border-teal-500 bg-teal-50/40 ring-1 ring-teal-500' : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'}`}
                     >
                       <input type="radio" name="customer" value={c.id} checked={on} onChange={() => { setSelected(c.id); setError(null); }} className="sr-only" />
                       <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-semibold ${TINTS[i % TINTS.length]}`}>{initials(c.name)}</span>

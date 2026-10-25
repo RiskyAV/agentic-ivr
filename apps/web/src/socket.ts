@@ -78,6 +78,8 @@ export class Socket {
         await api.checkToken(this.token);
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) {
+          // The user may have logged out or signed in again while the check was in flight.
+          if (this.stopped || current !== this) return;
           this.stopped = true;
           this.onAuthLost();
           return;

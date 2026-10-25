@@ -144,7 +144,7 @@ export function reduce(s: AppState, m: ServerMsg): AppState {
       const next = setProposal(s, m.proposalId, (p) =>
         p.status === 'executed' && m.status !== 'executed' ? null : { status: m.status, message: m.message, ...(m.reference && { reference: m.reference }) });
       // A failed but retryable execution leaves the proposal pending on the server; keep it confirmable.
-      const stillPending = m.status === 'failed' && /retry|try again/i.test(m.message);
+      const stillPending = m.status === 'failed' && m.retryable === true;
       const patched = stillPending ? setProposal(next, m.proposalId, (p) => ({ status: 'pending', message: p.message ?? m.message })) : next;
       return { ...patched, pendingProposals: stillPending ? patched.pendingProposals : patched.pendingProposals.filter((id) => id !== m.proposalId) };
     }
