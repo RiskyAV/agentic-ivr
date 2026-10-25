@@ -1,0 +1,7 @@
+{
+  "name": "@app/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": { "@app/shared": "*", "@app/domain": "*" }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@app/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5173",
+    "build": "vite build"
+  },
+  "dependencies": { "@app/shared": "*", "@app/domain": "*" }
+}

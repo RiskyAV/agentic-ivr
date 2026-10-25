@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/domain" },
+    { "path": "apps/mock-systems" },
+    { "path": "apps/server" },
+    { "path": "apps/web" }
+  ]
+}

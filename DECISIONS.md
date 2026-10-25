@@ -196,3 +196,9 @@ Status: `Accepted` = agreed, `Proposed` = suggested but not yet confirmed, `Supe
 - **Why:** In a regulated lender, the bar is "the model *cannot* do the wrong thing," not "the model was told not to." Prompts reduce attempts, and code makes them harmless.
 - **Rejected:** prompt-only guardrails. Also rejected: a serial guard before every turn, which adds about 200–400 ms to every turn for a rare event.
 - **Trade-off:** The parallel guard can flag after some text has already streamed. The UI then retracts the partial answer, and no action can have happened because proposals are held until the guard verdict arrives.
+
+## D-027 — Binary WebSocket frames with a `turnSeq` header for audio
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:** Audio travels as binary WebSocket frames: a 4-byte big-endian uint32 `turnSeq` followed by PCM16LE. Upstream mic frames use `turnSeq = 0`. Control messages stay JSON. The helpers `encodeAudioFrame`/`decodeAudioFrame` live in `@app/shared`.
+- **Why:** The header lets the client drop stale audio from an interrupted turn cheaply (compare `turnSeq` with the current one) and lets the server tag TTS output per turn, with no JSON parsing on the hot path.
+- **Rejected:** base64 audio inside JSON messages, which adds about 33% overhead and makes stale-audio filtering harder.
