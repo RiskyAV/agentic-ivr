@@ -15,13 +15,28 @@ const WORD_VALUE = new Map<string, number>();
 ONES.forEach((w, i) => i > 0 && WORD_VALUE.set(w, i));
 for (const [n, w] of Object.entries(TENS)) WORD_VALUE.set(w, Number(n));
 
-function fromRupees(rupees: number): ParseAmountResult {
-  if (!Number.isFinite(rupees) || rupees <= 0) return fail('amount must be greater than zero');
-  const paise = Math.round(rupees * 100);
-  if (Math.abs(paise - rupees * 100) > 1e-6) return fail('amount has more than two decimal places');
-  if (!Number.isSafeInteger(paise)) return fail('amount too large');
-  return { ok: true, paise };
+/** Exact scaled-integer conversion of "int.frac" * mult rupees to paise (no float arithmetic). */
+function fromDecimal(int: string, frac: string, mult: number): ParseAmountResult {
+  const num = BigInt(int + frac) * BigInt(mult) * 100n;
+  const den = 10n ** BigInt(frac.length);
+  if (num % den !== 0n) return fail('amount has more than two decimal places');
+  const paise = num / den;
+  if (paise <= 0n) return fail('amount must be greater than zero');
+  if (paise > BigInt(Number.MAX_SAFE_INTEGER)) return fail('amount too large');
+  return { ok: true, paise: Number(paise) };
 }
+
+function fromNumber(n: number): ParseAmountResult {
+  if (!Number.isFinite(n) || n <= 0) return fail('amount must be greater than zero');
+  const s = String(n);
+  const m = /^(\d+)(?:\.(\d+))?$/.exec(s);
+  if (!m) return fail('amount too large');
+  return fromDecimal(m[1]!, m[2] ?? '', 1);
+}
+
+// Indian (1,23,456) or international (123,456 / 1,234,567) digit grouping only.
+const INDIAN_GROUPING = /^\d{1,3}(?:,\d{2})*,\d{3}$/;
+const INTL_GROUPING = /^\d{1,3}(?:,\d{3})+$/;
 
 /** Parses number words ("one lakh fifty thousand") up to crore. Returns rupees or null. */
 function wordsToRupees(text: string): number | null {
@@ -68,11 +83,11 @@ function wordsToRupees(text: string): number | null {
   return total + rest;
 }
 
-const NUMERIC = /^(\d+(?:\.\d+)?|\.\d+)\s*([a-z]+)?$/;
+const NUMERIC = /^(\d[\d,]*|)(?:\.(\d+))?\s*([a-z]+)?$/;
 
 /** Parses a loosely phrased amount. A number input means rupees. Never guesses. */
 export function parseAmount(input: number | string): ParseAmountResult {
-  if (typeof input === 'number') return fromRupees(input);
+  if (typeof input === 'number') return fromNumber(input);
   if (typeof input !== 'string') return fail('unsupported input');
 
   const text = input
@@ -80,19 +95,22 @@ export function parseAmount(input: number | string): ParseAmountResult {
     .replace(/₹|\binr\b|\brs\b\.?|\brupees?\b|\bonly\b/g, ' ')
     .replace(/(?<=\d)\s*rs\.?$/, '')
     .replace(/^rs\.?(?=\d)/, '')
-    .replace(/,/g, '')
     .replace(/\s+/g, ' ')
     .trim();
   if (!text) return fail('empty amount');
   if (text.startsWith('-')) return fail('amount cannot be negative');
 
-  const m = NUMERIC.exec(text.replace(/(\d)\s+(?=[a-z])/, '$1 '));
-  if (m) {
-    const mult = m[2] === undefined ? 1 : SUFFIX[m[2]];
-    if (mult === undefined) return fail(`unrecognised unit "${m[2]}"`);
-    return fromRupees(Number(m[1]) * mult);
+  const m = NUMERIC.exec(text);
+  if (m && (m[1] || m[2] !== undefined)) {
+    const intPart = m[1] ?? '';
+    if (intPart.includes(',') && !INDIAN_GROUPING.test(intPart) && !INTL_GROUPING.test(intPart)) {
+      return fail('ambiguous digit grouping');
+    }
+    const mult = m[3] === undefined ? 1 : SUFFIX[m[3]];
+    if (mult === undefined) return fail(`unrecognised unit "${m[3]}"`);
+    return fromDecimal(intPart.replace(/,/g, '') || '0', m[2] ?? '', mult);
   }
   const words = wordsToRupees(text);
   if (words === null) return fail('could not understand the amount');
-  return fromRupees(words);
+  return fromDecimal(String(words), '', 1);
 }
