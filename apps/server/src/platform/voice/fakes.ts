@@ -69,6 +69,8 @@ export class FakeTts implements TtsStream {
     const a: Alignment = { chars, charStartTimesMs: chars.map((_, i) => base + i * this.msPerChar), charDurationsMs: chars.map(() => this.msPerChar) };
     for (const cb of this.audioCbs) cb(pcm, a);
   }
+  /** Vendor final with no audio at all (e.g. nothing generated). */
+  finishSilently() { for (const cb of this.doneCbs.splice(0)) cb(); }
   fail(e = new Error('tts down')) { for (const cb of this.errCbs) cb(e); }
   private maybeDone() {
     if (this.ended && this.pendingAudio === 0 && !this.closed) for (const cb of this.doneCbs.splice(0)) cb();

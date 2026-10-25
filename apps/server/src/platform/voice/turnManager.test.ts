@@ -414,6 +414,35 @@ describe('VoiceSession', () => {
     expect(s.confirm).not.toHaveBeenCalled();
   });
 
+  it('a read-back that produced no audio never arms consent', async () => {
+    const s = await setup({ rules: [PREPAY_RULE], ttsAuto: false });
+    s.stt.emit('committed', 'I want to prepay fifty thousand');
+    await waitFor(() => s.msgs('action_proposal').length === 1 && s.msgs('assistant_done').length === 1, 4000);
+    const tts = s.ttsList[0]!;
+    await waitFor(() => tts.ended, 2000);
+    tts.finishSilently(); // TTS final with zero audio frames
+    const seq = s.msgs('tts_begin')[0]!.turnSeq;
+    await waitFor(() => s.tts_ends(seq) === 1, 2000);
+    await sleep(50);
+    s.stt.emit('committed', 'yes');
+    await waitFor(() => s.msgs('assistant_done').length === 2, 2000);
+    expect(s.confirm).not.toHaveBeenCalled();
+    expect(s.msgs('assistant_done')[1]!.text).toContain('Just to confirm');
+  });
+
+  it('with BARGE_IN_VAD_MS=0, mic voice that began before consent was armed still makes "yes" a re-read', async () => {
+    const s = await setup({ rules: [PREPAY_RULE], cfg: { bargeInVadMs: 0 } });
+    await proposed(s, { played: false });
+    feeder(s.vs)(300, 8000); // "yes" spoken over the end of the read-back
+    const seq = s.msgs('tts_begin')[0]!.turnSeq;
+    s.vs.onPlaybackReport(seq, s.audioMs(seq)); // consent armed now
+    s.stt.emit('partial', 'yes'); // transcripts arrive later
+    s.stt.emit('committed', 'yes');
+    await waitFor(() => s.msgs('assistant_done').length === 2, 2000);
+    expect(s.confirm).not.toHaveBeenCalled();
+    expect(s.msgs('assistant_done')[1]!.text).toContain('Just to confirm');
+  });
+
   it('a typed turn after a fully heard read-back clears the awaited consent', async () => {
     const s = await setup({ rules: [PREPAY_RULE, EMI_RULE] });
     await proposed(s);

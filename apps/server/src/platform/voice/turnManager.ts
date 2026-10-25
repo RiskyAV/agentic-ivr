@@ -343,8 +343,6 @@ export class VoiceSession {
    * The floor follows every frame (EMA, ~3 s up, ~0.3 s down), so steady fan or street noise is learnt and ignored.
    */
   private detectVoice(pcm: Buffer) {
-    const needMs = this.d.cfg.bargeInVadMs ?? 500;
-    if (needMs <= 0) return;
     const ms = pcm.length / PCM16K_BYTES_PER_MS;
     const db = pcmDbfs(pcm);
     const floor = this.noiseDb;
@@ -355,6 +353,9 @@ export class VoiceSession {
       if (this.voiceLastAt === undefined || now - this.voiceLastAt > VAD_HANGOVER_MS) this.voiceRunStartAt = now - ms;
       this.voiceLastAt = now;
     }
+    // Onset tracking above runs on every frame (consent timing needs it); only the barge-in trigger can be disabled.
+    const needMs = this.d.cfg.bargeInVadMs ?? 500;
+    if (needMs <= 0) return;
     const u = this.cur;
     if (!u || !u.speaking(now, this.margin)) {
       this.vadVoicedMs = 0;
@@ -412,7 +413,7 @@ export class VoiceSession {
   /** Playback of a fully generated, uninterrupted read-back has ended: now a spoken yes is an answer to it. */
   private armAwaiting(u: Utterance) {
     clearTimeout(u.armTimer);
-    if (this.stopped || this.cur !== u || u.bargedIn || u.closed || !u.readBackGenerated || !u.readBackFor || this.awaiting) return;
+    if (this.stopped || this.cur !== u || u.bargedIn || u.closed || u.firstAudioAt === undefined || !u.readBackGenerated || !u.readBackFor || this.awaiting) return;
     this.awaiting = u.readBackFor;
     this.armedAt = this.now();
   }
@@ -631,12 +632,17 @@ export class VoiceSession {
     u.ttsDone = true;
     // The read-back was generated in full and was the last thing in this utterance: arm consent when its playback
     // ends (client playback_report, or the estimate), unless it is cut off first.
-    if (!u.closed && !u.ttsFailed && !u.bargedIn && this.cur === u && u.readBacks === 1 && u.readBackFor && u.sentChars === u.readBackAt) {
+    // A read-back that produced no audio was never heard: never arm (a later yes gets a re-read).
+    if (!u.closed && !u.ttsFailed && !u.bargedIn && this.cur === u && u.firstAudioAt !== undefined
+      && u.readBacks === 1 && u.readBackFor && u.sentChars === u.readBackAt) {
       u.readBackGenerated = true;
       if (u.playbackComplete) this.armAwaiting(u);
       else {
-        u.armTimer = setTimeout(() => this.armAwaiting(u), Math.max(0, u.playbackEndsAt(this.margin) - this.now()));
-        u.armTimer.unref?.();
+        const delay = u.playbackEndsAt(this.margin) - this.now();
+        if (Number.isFinite(delay)) {
+          u.armTimer = setTimeout(() => this.armAwaiting(u), Math.max(0, delay));
+          u.armTimer.unref?.();
+        }
       }
     }
     if (!u.closed) this.send({ type: 'tts_end', turnSeq: u.turnSeq });
