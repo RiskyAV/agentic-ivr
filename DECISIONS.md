@@ -213,3 +213,9 @@ Status: `Accepted` = agreed, `Proposed` = suggested but not yet confirmed, `Supe
 - **Date:** 2026-10-25 · **Status:** Accepted
 - **Decision:** `parseAmount` accepts digits with ₹/Rs/commas and the suffixes k, l, lakh, lac, cr and crore, or number words up to crore. The word table is the reverse of the one `speakInr` uses (`ONES`/`TENS` exported from `format/inr.ts`). Scales must strictly descend ("one thousand lakh" and "50 crore crore" are rejected). Negative, zero, more than 2 decimal places, or partially parsed input is rejected with a reason and never guessed.
 - **Why:** A mis-heard amount that moves money is worse than asking again.
+
+## D-030 — Finance calculators: paise integers, per-step rounding, baseline from the actual EMI
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:** All calculators work in integer paise. EMI uses the closed-form formula in floating point and is rounded to the nearest rupee. Amortisation rounds monthly interest (`opening × bps / 120000`) to paise at each step, and the last instalment is `opening + interest`. Prepayment savings are measured against a baseline schedule built from the loan's actual EMI (not from `remainingMonths`). "Reduce tenure" keeps the EMI and re-amortises. "Reduce EMI" keeps `remainingMonths` and recomputes the EMI on `outstanding − amount`. `remainingTenure` counts a final partial instalment as a month and returns `Infinity` if the EMI does not cover the interest. Foreclosure accrues simple daily interest (`bps / 36500`) from the last due date, the charge is on principal, and GST is 18% of the charge. Penal charge is simple daily interest rounded to the rupee.
+- **Why:** These functions are the source of truth for every figure the AI states, so each rounding step is explicit and deterministic.
+- **Trade-off:** Paise-level rounding can differ by a rupee or two from a rupee-level hand calculation, so tests use a ±₹2 tolerance for lifetime-interest figures.
