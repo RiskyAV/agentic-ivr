@@ -104,6 +104,22 @@ describe('promise_to_pay', () => {
   });
 });
 
+describe('promise_to_pay boundaries', () => {
+  it('accepts today+7 and rejects today+8', async () => {
+    const h = setup();
+    expect(await h.svc.propose(h.ctxFor('C1003'), 'promise_to_pay', PTP(7))).toMatchObject({ ok: true });
+    expect(await h.svc.propose(h.ctxFor('C1003'), 'promise_to_pay', PTP(8))).toMatchObject({ ok: false });
+  });
+  it('accepts an amount exactly equal to one instalment', async () => {
+    const h = setup();
+    const loan = await h.connectors.lms.getLoan('PL-60917', { signal: new AbortController().signal });
+    if (!loan.ok) throw new Error('loan');
+    const r = await h.svc.propose(h.ctxFor('C1003'), 'promise_to_pay', { ...PTP(3), amount: String(loan.data.emi / 100) });
+    if (!r.ok) throw new Error(r.reason);
+    expect(r.proposal.figures['ptp.amount']).toEqual({ kind: 'money', paise: loan.data.emi });
+  });
+});
+
 describe('payment_link', () => {
   it('defaults to the overdue total; execution returns the customer-facing URL', async () => {
     const h = setup();

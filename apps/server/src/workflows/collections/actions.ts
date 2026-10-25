@@ -4,7 +4,7 @@ import type { ActionHandler, ValidateResult } from '../../platform/actions/types
 import { date, money, type BoundValue } from '../../platform/grounding/values.js';
 import { Gather, recordSource, resolveLoan } from '../../platform/tools/helpers.js';
 import type { ToolContext } from '../../platform/tools/types.js';
-import { createRequest, isoDate, paiseField } from '../loan-servicing/actions.js';
+import { createRequest, isoDate, paiseField } from '../shared/requests.js';
 import { activePtpDate, addDays, overdueFacts } from './overdue.js';
 
 const loanIdField = z.string().min(1).optional().describe('The loan id; omit to use the active loan.');
