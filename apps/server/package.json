@@ -6,6 +6,7 @@
   "dependencies": {
     "@app/domain": "*",
     "@app/shared": "*",
+    "@google/genai": "^2.31.0",
     "fastify": "^5.12.7",
     "zod": "^3.25.76",
     "zod-to-json-schema": "^3.25.2"
