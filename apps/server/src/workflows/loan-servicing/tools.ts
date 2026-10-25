@@ -290,7 +290,7 @@ const explainEmiChange: ToolDef<{ loanId?: string }> = {
 const amountSchema = z.preprocess((v) => (typeof v === 'number' ? String(v) : v), z.string().min(1))
   .describe('Prepayment amount as the customer said it, e.g. "50k", "1.5 lakh" or "50000".');
 
-const simulatePrepaymentTool: ToolDef<{ loanId?: string; amount: string; mode?: 'reduce_tenure' | 'reduce_emi' | 'both' }> = {
+export const simulatePrepaymentTool: ToolDef<{ loanId?: string; amount: string; mode?: 'reduce_tenure' | 'reduce_emi' | 'both' }> = {
   name: 'simulate_prepayment',
   description: 'Simulates a part-prepayment: charge, GST, months saved, interest saved if tenure is reduced, new EMI and interest saved if the EMI is reduced.',
   kind: 'calc',
