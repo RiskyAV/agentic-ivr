@@ -1,6 +1,6 @@
 import type { Source, SystemName } from '@app/shared';
-import type { PolicyClause } from '@app/domain';
-import type { LoanRecordDto } from '../connectors/types.js';
+import type { PolicyClause, PolicyTopic } from '@app/domain';
+import type { LoanRecordDto, PolicyClauseDto } from '../connectors/types.js';
 import type { Fetched } from '../connectors/resilientClient.js';
 import { ToolFailure, type ToolContext, type ToolFailureResult } from './types.js';
 
@@ -94,4 +94,37 @@ export function dedupeSources(sources: Source[]): Source[] {
     seen.add(k);
     return true;
   });
+}
+
+export type PolicyFetch = Fetched<PolicyClauseDto[]>;
+
+/** Starts a Policy-service fetch for a topic; never rejects, so it is safe to leave un-awaited if the tool fails first. */
+export function startPolicy(ctx: ToolContext, topic: PolicyTopic): Promise<PolicyFetch> {
+  return ctx.connectors.policy
+    .byTopic(topic, { signal: ctx.signal, observer: ctx.tracer.observer })
+    .catch((): PolicyFetch => ({ ok: false, error: 'unavailable' }));
+}
+
+/**
+ * Citation for a clause the domain rules selected. Rule evaluation stays in @app/domain (D-017); the text shown comes
+ * from the Policy service. If the service is down the local copy is cited (flagged in the detail and in a span); if the
+ * service disagrees with the domain on version or text, the service's text is cited and `policy_mismatch` is recorded.
+ */
+export function citeClause(ctx: ToolContext, g: Gather, local: PolicyClause, fetched: PolicyFetch): Source {
+  if (!fetched.ok) {
+    ctx.tracer.span('policy_fallback', { clause: `${local.id} v${local.version}`, reason: fetched.error })();
+    return { ...clauseSource(local), detail: `${local.text} (local policy copy)` };
+  }
+  g.noteStale(fetched.stale?.asOf);
+  const same = fetched.data.filter((c) => c.id === local.id);
+  const svc = same.find((c) => c.version === local.version) ?? same.sort((a, b) => b.version - a.version)[0];
+  if (!svc) {
+    ctx.tracer.span('policy_fallback', { clause: `${local.id} v${local.version}`, reason: 'not_in_service' })();
+    ctx.tracer.span('policy_mismatch', { clause: local.id, domainVersion: local.version, serviceVersion: 'none' })();
+    return { ...clauseSource(local), detail: `${local.text} (local policy copy)` };
+  }
+  if (svc.version !== local.version || svc.text !== local.text) {
+    ctx.tracer.span('policy_mismatch', { clause: local.id, domainVersion: local.version, serviceVersion: svc.version })();
+  }
+  return clauseSource(svc);
 }

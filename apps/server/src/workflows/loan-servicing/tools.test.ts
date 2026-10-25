@@ -42,6 +42,71 @@ describe('explain_emi_change', () => {
   });
 });
 
+describe('fix round 1', () => {
+  it('Rahul EMI change: direction and the rate entry matched to the EMI change', async () => {
+    const h = harness();
+    const r = ok(await h.reg.run('explain_emi_change', {}, h.ctxFor('C1001')));
+    expect(r.values['emi_change.direction']).toEqual({ kind: 'text', s: 'increase' });
+    expect(r.values['emi_change.old_rate']).toEqual({ kind: 'pct', bps: 850 });
+    expect(r.values['emi_change.new_rate']).toEqual({ kind: 'pct', bps: 910 });
+  });
+  it('rate keys are omitted when no rate entry precedes the EMI change; cause comes from the EMI record', async () => {
+    const h = harness();
+    const ctx = h.ctxFor('C1001');
+    const real = h.connectors.lms.getLoan;
+    h.connectors.lms.getLoan = async (id, c) => {
+      const r = await real(id, c);
+      if (!r.ok) return r;
+      return { ...r, data: { ...r.data, rateHistory: [{ effectiveDate: '2026-12-01', oldRateBps: 910, newRateBps: 950 }], emiHistory: [{ effectiveDate: '2026-10-05', oldEmi: 100, newEmi: 90, reason: 'prepayment' }] } };
+    };
+    const r = ok(await h.reg.run('explain_emi_change', {}, ctx));
+    expect(r.values['emi_change.old_rate']).toBeUndefined();
+    expect(r.values['emi_change.new_rate']).toBeUndefined();
+    expect(r.values['emi_change.cause']).toEqual({ kind: 'text', s: 'prepayment' });
+    expect(r.values['emi_change.direction']).toEqual({ kind: 'text', s: 'decrease' });
+  });
+  it('get_service_requests exposes only whitelisted fields', async () => {
+    const h = harness();
+    const ctx = h.ctxFor('C1002');
+    await h.connectors.ops.create('C1002', 'dispute', { secret: 'free text' }, 'k1', { signal: ctx.signal });
+    const r = ok(await h.reg.run('get_service_requests', {}, ctx));
+    const rows = (r.data as { requests: Array<Record<string, unknown>> }).requests;
+    expect(rows).toHaveLength(1);
+    expect(Object.keys(rows[0]!).sort()).toEqual(['createdAt', 'id', 'status', 'type']);
+    expect(JSON.stringify(r.data)).not.toMatch(/customerId|params|secret/);
+  });
+  it('clause citation comes from the Policy service', async () => {
+    const h = harness();
+    const r = ok(await h.reg.run('simulate_prepayment', { amount: '50k' }, h.ctxFor('C1001')));
+    const svc = await h.connectors.policy.byTopic('prepayment', { signal: new AbortController().signal });
+    if (!svc.ok) throw new Error('x');
+    const src = r.sources.find((s) => s.kind === 'clause')!;
+    expect(src.detail).toBe(svc.data.find((c) => c.id === 'PRE-01')!.text);
+    expect(src.detail).not.toContain('local policy copy');
+  });
+  it('Policy service down falls back to the local copy, flagged, still ok', async () => {
+    const h = harness({ policy: { minMs: 0, maxMs: 0, failRate: 1 } });
+    const ctx = h.ctxFor('C1001');
+    const r = ok(await h.reg.run('simulate_prepayment', { amount: '50k' }, ctx));
+    const src = r.sources.find((s) => s.kind === 'clause')!;
+    expect(src.ref).toBe('PRE-01 v1');
+    expect(src.detail!.endsWith('(local policy copy)')).toBe(true);
+    expect(ctx.tracer.toTrace().spans.some((sp) => sp.name === 'policy_fallback')).toBe(true);
+  }, 15_000);
+  it('a service/domain disagreement cites the service text and records policy_mismatch', async () => {
+    const h = harness();
+    const ctx = h.ctxFor('C1001');
+    const real = h.connectors.policy.byTopic;
+    h.connectors.policy.byTopic = async (t, c) => {
+      const r = await real(t, c);
+      return r.ok ? { ...r, data: r.data.map((x) => ({ ...x, text: `${x.text} [revised]` })) } : r;
+    };
+    const r = ok(await h.reg.run('get_policy', { topic: 'prepayment' }, ctx));
+    expect(r.sources.find((s) => s.kind === 'clause')!.detail).toMatch(/\[revised\]$/);
+    expect(ctx.tracer.toTrace().spans.some((sp) => sp.name === 'policy_mismatch')).toBe(true);
+  });
+});
+
 describe('simulate_prepayment', () => {
   it('Rahul 50k both modes matches the domain simulation', async () => {
     const h = harness();

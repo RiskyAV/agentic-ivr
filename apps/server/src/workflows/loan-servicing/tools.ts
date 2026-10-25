@@ -6,7 +6,7 @@ import {
 import type { Source, TableView } from '@app/shared';
 import { count, date, money, months, pct, text, type BoundValue } from '../../platform/grounding/values.js';
 import {
-  Gather, calcSource, clauseSource, dedupeSources, recordSource, requireLoan,
+  Gather, calcSource, citeClause, dedupeSources, recordSource, requireLoan, startPolicy,
 } from '../../platform/tools/helpers.js';
 import { ToolFailure, type ToolContext, type ToolDef, type ToolResult } from '../../platform/tools/types.js';
 
@@ -104,6 +104,7 @@ const getPaymentHistory: ToolDef<{ loanId?: string; months?: number; status?: 'f
   }),
   async run(ctx, args) {
     const g = new Gather(ctx);
+    const pol = startPolicy(ctx, 'bounce_charge');
     const loan = await requireLoan(ctx, g, args.loanId);
     const list = g.need(
       'payments',
@@ -112,6 +113,7 @@ const getPaymentHistory: ToolDef<{ loanId?: string; months?: number; status?: 'f
     );
     const values: Values = { 'payments.count': count(list.length) };
     const sources: Source[] = [loanSrc(loan.loanId, loan.product)];
+    let bounceClause: PolicyClause | undefined;
     const rows = list.map((p) => {
       let bounceChargeValid: boolean | undefined;
       if (p.status === 'failed') {
@@ -121,12 +123,13 @@ const getPaymentHistory: ToolDef<{ loanId?: string; months?: number; status?: 'f
         values[`payments.${p.paymentId}.bounce_charge`] = money(levied);
         values[`payments.${p.paymentId}.bounce_charge_valid`] = text(bounceChargeValid ? 'yes' : 'no');
         values[`payments.${p.paymentId}.policy_charge`] = money(rule.amount);
-        sources.push(clauseSource(rule.clause));
+        bounceClause = rule.clause;
       }
       values[`payments.${p.paymentId}.amount`] = money(p.amount);
       values[`payments.${p.paymentId}.date`] = date(p.date);
       return { ...p, ...(bounceChargeValid !== undefined && { bounceChargeValid }) };
     });
+    if (bounceClause) sources.push(citeClause(ctx, g, bounceClause, await pol));
     values['payments.failed_count'] = count(list.filter((p) => p.status === 'failed').length);
     const table: TableView = {
       title: `Payments for ${loan.loanId}`,
@@ -150,6 +153,7 @@ const getPolicy: ToolDef<{ topic: PolicyTopic; loanId?: string }> = {
   schema: z.object({ topic: z.enum(TOPICS).describe('Policy topic.'), loanId }),
   async run(ctx, args) {
     const g = new Gather(ctx);
+    const pol = startPolicy(ctx, args.topic);
     const loan = await requireLoan(ctx, g, args.loanId);
     let clause: PolicyClause;
     const values: Values = {};
@@ -189,10 +193,11 @@ const getPolicy: ToolDef<{ topic: PolicyTopic; loanId?: string }> = {
     } catch (e) {
       throw new ToolFailure({ ok: false, error: 'not_found', message: e instanceof Error ? e.message : 'No applicable policy clause.' });
     }
-    sources.push(clauseSource(clause), loanSrc(loan.loanId, loan.product));
+    const cited = citeClause(ctx, g, clause, await pol);
+    sources.push(cited, loanSrc(loan.loanId, loan.product));
     ctx.session.entities.lastTopic = args.topic;
     return {
-      ok: true, data: { clauseId: clause.id, version: clause.version, title: clause.title, text: clause.text },
+      ok: true, data: { clauseId: clause.id, version: clause.version, title: cited.label, text: cited.detail },
       values, sources: dedupeSources(sources), ...g.stale,
     };
   },
@@ -220,7 +225,9 @@ const getServiceRequests: ToolDef<Record<string, never>> = {
       rows: list.map((r) => [r.id, r.type, r.status, formatDate(r.createdAt.slice(0, 10))]),
     };
     return {
-      ok: true, data: { requests: list }, values,
+      ok: true,
+      data: { requests: list.map((r) => ({ id: r.id, type: r.type, status: r.status, createdAt: r.createdAt })) },
+      values,
       sources: list.slice(0, 5).map((r) => recordSource('ops', r.id, `Service request ${r.id}`)), tables: [table], ...g.stale,
     };
   },
@@ -235,25 +242,32 @@ const explainEmiChange: ToolDef<{ loanId?: string }> = {
   schema: z.object({ loanId }),
   async run(ctx, args) {
     const g = new Gather(ctx);
+    const pol = startPolicy(ctx, 'rate_reset');
     const picked = await requireLoan(ctx, g, args.loanId);
     const loan = g.need('lms', await ctx.connectors.lms.getLoan(picked.loanId, g.cc), `loan ${picked.loanId}`);
     const change = loan.emiHistory[loan.emiHistory.length - 1];
     if (!change) return { ok: false, error: 'not_found', message: `No EMI change is on record for loan ${loan.loanId}.` };
-    const rate = loan.rateHistory[loan.rateHistory.length - 1];
-    const reason = change.reason ?? '';
-    const cause = reason === 'tenure_change' || reason === 'prepayment' ? reason : reason === 'rate_reset' || rate ? 'rate_reset' : 'tenure_change';
+    // The rate change in force at the EMI change: latest rate entry effective on or before the EMI change date.
+    const rate = [...loan.rateHistory]
+      .filter((r) => r.effectiveDate <= change.effectiveDate)
+      .sort((x, y) => x.effectiveDate.localeCompare(y.effectiveDate))
+      .pop();
+    // Cause comes from the EMI change record itself.
+    const cause = change.reason === 'rate_reset' || change.reason === 'tenure_change' || change.reason === 'prepayment' ? change.reason : 'unknown';
     const newRate = rate?.newRateBps ?? loan.annualRateBps;
-    const oldRate = rate?.oldRateBps ?? loan.annualRateBps;
     const values: Values = {
       'emi_change.old_emi': money(change.oldEmi),
       'emi_change.new_emi': money(change.newEmi),
       'emi_change.difference': money(Math.abs(change.newEmi - change.oldEmi)),
+      'emi_change.direction': text(change.newEmi >= change.oldEmi ? 'increase' : 'decrease'),
       'emi_change.cause': text(cause),
       'emi_change.effective_date': date(change.effectiveDate),
-      'emi_change.old_rate': pct(oldRate),
-      'emi_change.new_rate': pct(newRate),
       'emi_change.remaining_months': months(loan.remainingMonths),
     };
+    if (rate) {
+      values['emi_change.old_rate'] = pct(rate.oldRateBps);
+      values['emi_change.new_rate'] = pct(rate.newRateBps);
+    }
     const sources: Source[] = [loanSrc(loan.loanId, loan.product)];
     const altMonths = remainingTenure(loan.outstanding, newRate, change.oldEmi);
     if (Number.isFinite(altMonths)) {
@@ -265,7 +279,7 @@ const explainEmiChange: ToolDef<{ loanId?: string }> = {
       ));
     }
     if (cause === 'rate_reset') {
-      try { sources.push(clauseSource(selectClause('rate_reset', loan, ctx.today))); } catch { /* not a floating loan */ }
+      try { sources.push(citeClause(ctx, g, selectClause('rate_reset', loan, ctx.today), await pol)); } catch { /* not a floating loan */ }
     }
     return { ok: true, data: { loanId: loan.loanId, change, rateChange: rate ?? null }, values, sources: dedupeSources(sources), ...g.stale };
   },
@@ -290,6 +304,7 @@ const simulatePrepaymentTool: ToolDef<{ loanId?: string; amount: string; mode?: 
     const parsed = parseAmount(args.amount);
     if (!parsed.ok) return { ok: false, error: 'invalid', message: `Could not understand the amount "${args.amount}": ${parsed.reason}. Ask the customer for a clear amount.` };
     const g = new Gather(ctx);
+    const pol = startPolicy(ctx, 'prepayment');
     const picked = await requireLoan(ctx, g, args.loanId);
     const loan = g.need('lms', await ctx.connectors.lms.getLoan(picked.loanId, g.cc), `loan ${picked.loanId}`);
     const rule = prepaymentRule(loan, ctx.today);
@@ -337,7 +352,7 @@ const simulatePrepaymentTool: ToolDef<{ loanId?: string; amount: string; mode?: 
     ctx.session.entities.lastTopic = 'prepayment';
     const sources = [
       loanSrc(loan.loanId, loan.product),
-      clauseSource(rule.clause),
+      citeClause(ctx, g, rule.clause, await pol),
       calcSource(
         'simulatePrepayment', 'Prepayment simulation',
         `prepay ${formatInr(amount)} on ${formatInr(loan.outstanding)} at ${formatPct(loan.annualRateBps)}, EMI ${formatInr(loan.emi)}, ${sched.length || loan.remainingMonths} months left`,
@@ -356,6 +371,8 @@ const checkForeclosure: ToolDef<{ loanId?: string }> = {
   schema: z.object({ loanId }),
   async run(ctx, args) {
     const g = new Gather(ctx);
+    const polFc = startPolicy(ctx, 'foreclosure');
+    const polPre = startPolicy(ctx, 'prepayment');
     const picked = await requireLoan(ctx, g, args.loanId);
     const loan = g.need('lms', await ctx.connectors.lms.getLoan(picked.loanId, g.cc), `loan ${picked.loanId}`);
     const rule = foreclosureRule(loan, ctx.today);
@@ -366,7 +383,7 @@ const checkForeclosure: ToolDef<{ loanId?: string }> = {
       'foreclosure.as_on': date(ctx.today),
     };
     if (rule.lockInEndsOn) values['foreclosure.lock_in_ends_on'] = date(rule.lockInEndsOn);
-    const sources: Source[] = [loanSrc(loan.loanId, loan.product), clauseSource(rule.clause), clauseSource(prepay.clause)];
+    const sources: Source[] = [loanSrc(loan.loanId, loan.product), citeClause(ctx, g, rule.clause, rule.clause.topic === 'foreclosure' ? await polFc : await polPre), citeClause(ctx, g, prepay.clause, await polPre)];
     let quote;
     if (rule.eligible) {
       quote = foreclosureQuote({
@@ -397,6 +414,7 @@ const listOptions: ToolDef<{ loanId?: string }> = {
   schema: z.object({ loanId }),
   async run(ctx, args) {
     const g = new Gather(ctx);
+    const pol = startPolicy(ctx, 'prepayment');
     const loan = await requireLoan(ctx, g, args.loanId);
     const sub = { loanId: loan.loanId };
     const [fc, emiChange] = await Promise.all([checkForeclosure.run(ctx, sub), explainEmiChange.run(ctx, sub)]);
@@ -426,7 +444,7 @@ const listOptions: ToolDef<{ loanId?: string }> = {
         ],
       },
       values,
-      sources: dedupeSources([...parts.flatMap((p) => p.sources), clauseSource(rule.clause)]),
+      sources: dedupeSources([...parts.flatMap((p) => p.sources), citeClause(ctx, g, rule.clause, await pol)]),
       ...(stale && { stale: { asOf: stale } }),
     };
   },
