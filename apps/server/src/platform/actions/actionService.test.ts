@@ -154,12 +154,15 @@ describe('ActionService', () => {
     expect(good.summary).not.toContain(charged!.paymentId);
   });
 
-  it('(h) a transient ops failure at execute time is retried idempotently: executed once', async () => {
+  it('(h) response lost after the backend committed: retries are absorbed by the idempotency key, executed once', async () => {
     const s = setup();
     const inner = injectTransport(s.app);
     let posts = 0;
     const flaky: Transport = async (req) => {
-      if (req.method === 'POST' && req.url.startsWith('/ops/requests') && posts++ === 0) return { status: 503, body: { error: 'down' } };
+      if (req.method === 'POST' && req.url.startsWith('/ops/requests') && posts++ === 0) {
+        await inner(req); // committed ...
+        return { status: 503, body: {} }; // ... but the client never sees it
+      }
       return inner(req);
     };
     const ctx: ToolContext = { ...s.ctxFor('C1001'), connectors: buildConnectors(flaky) };
@@ -170,19 +173,60 @@ describe('ActionService', () => {
     expect(await s.opsCount('C1001')).toBe(1);
   });
 
-  it('execution that keeps failing -> failed and audited', async () => {
+  it('uncertain execution: failed/execution_uncertain, stays pending, re-confirm returns same reference, one request', async () => {
     const s = setup();
     const inner = injectTransport(s.app);
-    let down = false;
-    const t: Transport = async (req) => (down && req.method === 'POST' ? { status: 503, body: {} } : inner(req));
+    let lose = false;
+    let first = true;
+    const t: Transport = async (req) => {
+      if (lose && req.method === 'POST' && req.url.startsWith('/ops/requests')) {
+        if (first) { first = false; await inner(req); } // backend commits once; every response is lost
+        return { status: 503, body: {} };
+      }
+      return inner(req);
+    };
     const ctx: ToolContext = { ...s.ctxFor('C1001'), connectors: buildConnectors(t) };
     const p = await okP(s.svc.propose(ctx, 'prepayment', prepay));
-    down = true;
-    const out = await s.svc.confirm(ctx.session, p.id, p.termsHash, 'ui', ctx);
-    expect(out.status).toBe('failed');
-    expect(p.status).toBe('failed');
+    const expiry = p.expiresAt;
+    lose = true;
+    const out1 = await s.svc.confirm(ctx.session, p.id, p.termsHash, 'ui', ctx);
+    expect(out1).toMatchObject({ status: 'failed', reason: 'execution_uncertain' });
+    expect(out1.message).toMatch(/safely retry/);
+    expect(p.status).toBe('pending');
+    expect(p.expiresAt).toBe(expiry);
     expect(s.audit.list(3).map((e) => e.event)).toContain('failed');
+    expect(await s.opsCount('C1001')).toBe(1);
+    lose = false;
+    const out2 = await s.svc.confirm(ctx.session, p.id, p.termsHash, 'ui', ctx);
+    expect(out2.status).toBe('executed');
+    expect(await s.opsCount('C1001')).toBe(1);
+    const reqs = ((await s.app.inject({ method: 'GET', url: '/ops/requests?customerId=C1001' })).json() as { requests: { id: string }[] }).requests;
+    expect(reqs[0]!.id).toBe(out2.reference);
+  });
+
+  it('validation outage at confirm keeps the proposal pending; a later confirm succeeds', async () => {
+    const s = setup();
+    const ctx = s.ctxFor('C1001');
+    const p = await okP(s.svc.propose(ctx, 'prepayment', prepay));
+    const real = s.connectors.lms.getLoan;
+    s.connectors.lms.getLoan = async () => { throw new Error('boom'); };
+    const down = await s.svc.confirm(ctx.session, p.id, p.termsHash, 'ui', ctx);
+    expect(down).toMatchObject({ status: 'failed', reason: 'validation_unavailable' });
+    expect(down.message).toMatch(/try again/i);
+    expect(p.status).toBe('pending');
     expect(await s.opsCount('C1001')).toBe(0);
+    s.connectors.lms.getLoan = real;
+    expect((await s.svc.confirm(ctx.session, p.id, p.termsHash, 'ui', ctx)).status).toBe('executed');
+  });
+
+  it('ticket free text with a phone number never reaches the audit log', async () => {
+    const s = setup();
+    const ctx = s.ctxFor('C1001');
+    await okP(s.svc.propose(ctx, 'ticket', { category: 'other', description: 'call me on 9820145567 re PAN ABCDE1234F' }));
+    const dump = JSON.stringify(s.audit.list(10));
+    expect(dump).not.toContain('9820145567');
+    expect(dump).not.toContain('ABCDE1234F');
+    expect(dump).not.toContain('call me');
   });
 
   it('terms_changed: figures that differ at execute time reject without executing', async () => {

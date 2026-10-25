@@ -15,4 +15,10 @@ describe('redact', () => {
     expect(out.name).toBe('Neha');
     expect(input.list[0]!.email).toBe('a@b.in');
   });
+  it('scrubs PII patterns inside free text', () => {
+    const out = redact({ note: 'call 9820145567, PAN ABCDE1234F, a@b.in, acct 50100234871965', ref: 'HL-88231 PRP-06a40240' });
+    expect(out.note).toBe('call XXXXXX5567, PAN XXXXXX234F, XXXXXXa, acct XXXXXX1965');
+    expect(out.ref).toBe('HL-88231 PRP-06a40240');
+    expect(redact('+919820145567')).toBe('XXXXXX5567');
+  });
 });

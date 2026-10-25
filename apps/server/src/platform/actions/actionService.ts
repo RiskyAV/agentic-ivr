@@ -93,7 +93,7 @@ export class ActionService {
     this.proposals.set(proposal.id, proposal);
     this.sessions.set(proposal.id, ctx.session);
     ctx.session.pendingProposalIds.push(proposal.id);
-    this.log(proposal, 'proposed', { summary: proposal.summary });
+    this.log(proposal, 'proposed', { figures: proposal.figures });
     return { ok: true, proposal };
   }
 
@@ -148,7 +148,9 @@ export class ActionService {
     try {
       v = await h.validate(ctx, p.params);
     } catch {
-      return reject('validation_unavailable', 'I could not re-check your request just now, so nothing was done. Please try again.');
+      // Temporary outage: the proposal stays pending so the customer can simply confirm again.
+      this.log(p, 'failed', { reason: 'validation_unavailable' });
+      return { status: 'failed', reason: 'validation_unavailable', message: 'I could not re-check your request just now, so nothing was done. Please try again in a moment.' };
     }
     if (!v.ok) return reject('validation_failed', v.reason);
     if (computeTermsHash(p.type, p.params, v.figures) !== p.termsHash) {
@@ -162,10 +164,10 @@ export class ActionService {
       this.log(p, 'executed', { reference: r.reference });
       return { status: 'executed', reference: r.reference, message: r.message };
     } catch (e) {
-      p.status = 'failed';
-      this.settle(p, session);
-      this.log(p, 'failed', { error: e instanceof Error ? e.message : String(e) });
-      return { status: 'failed', message: 'I could not complete this request right now. Nothing has been changed; please try again later.' };
+      // The backend may have committed before the response was lost. Keep the proposal pending (same id, hash and
+      // expiry) so a re-confirm reuses the same idempotency key and the backend de-duplicates.
+      this.log(p, 'failed', { reason: 'execution_uncertain', error: e instanceof Error ? e.message : String(e) });
+      return { status: 'failed', reason: 'execution_uncertain', message: "I couldn't confirm the request went through. You can safely retry — it won't create a duplicate." };
     }
   }
 
