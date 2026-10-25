@@ -31,7 +31,7 @@ const AUTHORITY_CLAIMS: RegExp[] = [
 const IMPERSONATION_CLAIM = new RegExp(String.raw`\bi(?:\s+am|'m)\s+(?:fully\s+|already\s+)?authori[sz]ed`, I);
 
 const LOAN_ID = /\b(?:HL|PL|TW)[-\s]?\d{5}\b/gi;
-const ACCOUNT_NUMBER = /\b(?:account|acct|a\/c)\b[\s:#=-]*(?:(?:number|no\.?|num)\b[\s:#=-]*)?(?:is\b[\s:#=-]*)?(\d(?:[\d -]*\d)?)/gi;
+const ACCOUNT_NUMBER = /\b(?:account|acct|a\/c)[\s:#=-]*(?:(?:number|no\.?|num)[\s:#=-]*)?(?:is\b[\s:#=-]*)?(\d(?:[\d -]*\d)?)/gi;
 /** Rules only look at this many chars (bounds regex work); the classifier still sees the whole message. */
 export const RULES_MAX_CHARS = 2000;
 const normId = (id: string) => id.replace(/[^a-z0-9]/gi, '').toUpperCase();
@@ -46,7 +46,7 @@ function nameRegex(name: string): RegExp | null {
 
 /** Synchronous, case-insensitive fast rules. Returns the first hit, or null when nothing matched. */
 export function rules(text: string, ctx?: Partial<GuardContext>): RuleHit | null {
-  const t = text.slice(0, RULES_MAX_CHARS).normalize('NFKC').replace(/\p{Cf}/gu, '');
+  const t = text.slice(0, RULES_MAX_CHARS).normalize('NFKC').replace(/\p{Cf}/gu, '').replace(/[\u2018\u2019\u02bc]/g, "'").replace(/[\u201c\u201d]/g, '"');
 
   for (const p of PATTERNS) if (p.re.test(t)) return { category: p.category, rule: p.rule };
 
