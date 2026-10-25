@@ -129,4 +129,4 @@ export const socket = {
   sendBinary(d: Uint8Array): boolean { return current?.sendBinary(d) ?? false; },
 };
 
-if (import.meta.env.DEV) (window as unknown as { __northstar?: unknown }).__northstar = { dropSocket: () => socket.drop() };
+if (import.meta.env.DEV && typeof window !== 'undefined') (window as unknown as { __northstar?: unknown }).__northstar = { dropSocket: () => socket.drop() };

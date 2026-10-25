@@ -84,13 +84,26 @@ export class PcmPlayer {
 
   /** Stops all audio immediately. Frames of the flushed utterance that are still in flight are dropped. */
   flush(): { turnSeq: number; playedMs: number } {
-    const result = { turnSeq: this.current, playedMs: this.playedMs() };
+    const all = this.flushAll();
+    return all.find((r) => r.turnSeq === this.current) ?? { turnSeq: this.current, playedMs: 0 };
+  }
+
+  /**
+   * Like flush(), but returns one entry per utterance that was scheduled and has not already sent its idle
+   * report (a filler still playing, an answer queued behind it with playedMs 0). Utterances with no audio, or
+   * already reported as fully played, are not listed.
+   */
+  flushAll(): { turnSeq: number; playedMs: number }[] {
+    const reports = [...this.utts.values()]
+      .filter((u) => u.startAt !== null && !u.reported)
+      .sort((a, b) => a.seq - b.seq)
+      .map((u) => ({ turnSeq: u.seq, playedMs: this.playedMs(u.seq) }));
     for (const s of this.sources) s.stop();
     this.sources.clear();
     this.utts.clear();
     this.nextTime = 0;
     this.blocked = this.current;
-    return result;
+    return reports;
   }
 
   close(): void {

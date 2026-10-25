@@ -1,8 +1,20 @@
-import { decodeAudioFrame, encodeAudioFrame, type ServerMsg } from '@app/shared';
+import { decodeAudioFrame, encodeAudioFrame, type ClientMsg, type ServerMsg } from '@app/shared';
 import { socket, socketEvents } from '../socket';
 import { useStore } from '../store';
 import { frameLevel, startCapture, type Capture } from './capture';
 import { PcmPlayer } from './player';
+
+export interface VoiceDeps {
+  startCapture(onFrame: (pcm: Uint8Array) => void): Promise<Capture>;
+  createPlayer(): PcmPlayer;
+  socket: { send(m: ClientMsg): boolean; sendBinary(d: Uint8Array): boolean };
+  now(): number;
+}
+
+const defaultDeps = (): VoiceDeps => ({ startCapture, createPlayer: () => new PcmPlayer(24000), socket, now: () => performance.timeOrigin + performance.now() });
+
+const DEBUG_CAP = 50;
+const capped = <T,>(a: T[], v: T) => { a.push(v); if (a.length > DEBUG_CAP) a.shift(); };
 
 const PTT_KEY = 'northstar.voice.ptt';
 
@@ -13,9 +25,6 @@ export function savePtt(on: boolean): void {
   try { localStorage.setItem(PTT_KEY, on ? '1' : '0'); } catch { /* storage unavailable */ }
 }
 
-/** Epoch milliseconds from the high-resolution clock. */
-const epochNow = () => performance.timeOrigin + performance.now();
-
 export interface VoiceDebug {
   state: string; framesIn: number; framesOut: number; bytesIn: number; playing: boolean;
   reports: { turnSeq: number; playedMs: number }[]; marks: { turnId: string; mark: string; t: number }[];
@@ -24,7 +33,7 @@ export interface VoiceDebug {
 
 type LevelListener = (level: number) => void;
 
-class VoiceController {
+export class VoiceController {
   private capture: Capture | null = null;
   private player: PcmPlayer | null = null;
   private mode: 'open' | 'ptt' = 'open';
@@ -36,19 +45,26 @@ class VoiceController {
   private pendingSpeechEnd: number | null = null;
   private firstAudioSent = new Set<string>();
   private seqTurn = new Map<number, string>();
+  private gen = 0;
+  private serverStarted = false;
   readonly debug: VoiceDebug = { state: 'off', framesIn: 0, framesOut: 0, bytesIn: 0, playing: false, reports: [], marks: [], firstAudio: [] };
 
-  constructor() {
+  constructor(private readonly deps: VoiceDeps = defaultDeps()) {}
+
+  /** Wires the browser: socket events, Space key and the dev debug hook. Not used in unit tests. */
+  attach(): void {
     socketEvents.onMessage((m) => this.onMessage(m));
     socketEvents.onBinary((b) => this.onBinary(b));
     socketEvents.onClose(() => this.teardown(false));
-    if (typeof window !== 'undefined') {
-      window.addEventListener('keydown', (e) => this.onKey(e, true));
-      window.addEventListener('keyup', (e) => this.onKey(e, false));
-      window.addEventListener('blur', () => this.setPtt(false));
-      if (import.meta.env.DEV) (window as unknown as { __voice?: unknown }).__voice = this.debug;
-    }
+    window.addEventListener('keydown', (e) => this.onKey(e, true));
+    window.addEventListener('keyup', (e) => this.onKey(e, false));
+    window.addEventListener('blur', () => this.setPtt(false));
+    if (import.meta.env.DEV) (window as unknown as { __voice?: unknown }).__voice = this.debug;
   }
+
+  /** Server message entry points (public for the socket hooks and tests). */
+  handleMessage(m: ServerMsg): void { this.onMessage(m); }
+  handleBinary(b: ArrayBuffer): void { this.onBinary(b); }
 
   get active(): boolean { return useStore.getState().voice.state !== 'off'; }
   onLevel(f: LevelListener): () => void { this.levelCb.add(f); return () => { this.levelCb.delete(f); }; }
@@ -56,25 +72,30 @@ class VoiceController {
   async start(ptt: boolean): Promise<void> {
     if (this.active || this.starting) return;
     this.starting = true;
+    const g = ++this.gen;
     const st = useStore.getState();
     this.mode = ptt ? 'ptt' : 'open';
     st.setVoice({ state: 'connecting', caption: '', ptt });
     this.debug.state = 'connecting';
     try {
       // The player is created inside the click/keypress so the browser lets it play.
-      this.player = new PcmPlayer(24000);
+      this.player = this.deps.createPlayer();
       this.player.onFirstAudio((seq) => this.onFirstAudioPlayed(seq));
-      this.player.onIdle((seq, ms) => this.report(seq, ms));
-      this.capture = await startCapture((pcm) => this.onMicFrame(pcm));
-      if (useStore.getState().connection !== 'open' || !socket.send({ type: 'voice_start', ...(ptt ? { mode: 'ptt' as const } : {}) })) {
+      this.player.onIdle((seq, ms) => this.onIdle(seq, ms));
+      const capture = await this.deps.startCapture((pcm) => this.onMicFrame(pcm));
+      if (g !== this.gen) { capture.stop(); return; } // cancelled while the microphone was opening
+      this.capture = capture;
+      if (useStore.getState().connection !== 'open' || !this.deps.socket.send({ type: 'voice_start', ...(ptt ? { mode: 'ptt' as const } : {}) })) {
         throw new Error('not_connected');
       }
+      this.serverStarted = true;
       this.setState('listening');
     } catch (e) {
+      if (g !== this.gen) return;
       this.teardown(false);
       useStore.getState().notify('voice_start_failed', micMessage(e));
     } finally {
-      this.starting = false;
+      if (g === this.gen) this.starting = false;
     }
   }
 
@@ -85,7 +106,7 @@ class VoiceController {
     if (this.mode !== 'ptt' || !this.capture || this.pttDown === down) return;
     if (down && useStore.getState().voice.state === 'connecting') return;
     this.pttDown = down;
-    socket.send({ type: 'ptt', down });
+    this.deps.socket.send({ type: 'ptt', down });
     if (down) this.setState('listening');
     else this.onLevelValue(0);
   }
@@ -93,8 +114,10 @@ class VoiceController {
   get pttHeld(): boolean { return this.pttDown; }
 
   private teardown(notifyServer: boolean): void {
-    const wasActive = this.active || this.capture !== null || this.player !== null;
-    if (notifyServer && wasActive) socket.send({ type: 'voice_stop' });
+    if (notifyServer && this.serverStarted) this.deps.socket.send({ type: 'voice_stop' });
+    this.serverStarted = false;
+    this.gen += 1; // invalidates a start() still waiting for the microphone
+    this.starting = false;
     this.capture?.stop();
     this.capture = null;
     this.player?.close();
@@ -120,7 +143,7 @@ class VoiceController {
     this.onLevelValue(this.mode === 'ptt' && !this.pttDown ? 0 : frameLevel(pcm));
     if (this.mode === 'ptt' && !this.pttDown) return;
     if (useStore.getState().voice.state === 'connecting') return;
-    if (socket.sendBinary(encodeAudioFrame(0, pcm))) this.debug.framesOut++;
+    if (this.deps.socket.sendBinary(encodeAudioFrame(0, pcm))) this.debug.framesOut++;
   }
 
   private onLevelValue(v: number): void {
@@ -142,25 +165,30 @@ class VoiceController {
   }
 
   private report(turnSeq: number, playedMs: number): void {
-    this.debug.reports.push({ turnSeq, playedMs });
-    socket.send({ type: 'playback_report', turnSeq, playedMs });
+    capped(this.debug.reports, { turnSeq, playedMs });
+    this.deps.socket.send({ type: 'playback_report', turnSeq, playedMs });
+  }
+
+  /** An utterance finished playing. Leave "speaking" only when nothing else (e.g. the answer behind a filler) is still scheduled. */
+  private onIdle(turnSeq: number, playedMs: number): void {
+    this.report(turnSeq, playedMs);
     this.debug.playing = this.player?.playing ?? false;
-    // Everything said has been heard: back to listening (or thinking if an answer is still being prepared).
+    if (this.player?.playing) return;
     if (useStore.getState().voice.state === 'speaking') this.setState(useStore.getState().activeTurn ? 'thinking' : 'listening');
   }
 
   private mark(turnId: string, mark: 'speech_end' | 'first_audio_played', t: number): void {
-    this.debug.marks.push({ turnId, mark, t });
-    socket.send({ type: 'client_mark', turnId, mark, t });
+    capped(this.debug.marks, { turnId, mark, t });
+    this.deps.socket.send({ type: 'client_mark', turnId, mark, t });
   }
 
   private onFirstAudioPlayed(seq: number): void {
-    this.debug.firstAudio.push(seq);
+    capped(this.debug.firstAudio, seq);
+    this.setState('speaking'); // every utterance's first audible buffer, filler or answer
     const turnId = this.seqTurn.get(seq);
     if (!turnId || this.firstAudioSent.has(turnId)) return;
     this.firstAudioSent.add(turnId);
-    this.mark(turnId, 'first_audio_played', epochNow());
-    this.setState('speaking');
+    this.mark(turnId, 'first_audio_played', this.deps.now());
   }
 
   private onMessage(m: ServerMsg): void {
@@ -169,7 +197,7 @@ class VoiceController {
     }
     switch (m.type) {
       case 'transcript':
-        if (m.final && m.text.trim()) { this.pendingSpeechEnd = epochNow(); this.setState('thinking'); }
+        if (m.final && m.text.trim()) { this.pendingSpeechEnd = this.deps.now(); this.setState('thinking'); }
         break;
       case 'turn_start':
         if (m.channel === 'voice') {
@@ -187,8 +215,7 @@ class VoiceController {
         break;
       case 'barge_in': {
         if (!this.player) break;
-        const { turnSeq, playedMs } = this.player.flush();
-        this.report(turnSeq, playedMs);
+        for (const r of this.player.flushAll()) this.report(r.turnSeq, r.playedMs);
         this.debug.playing = false;
         this.setState('listening');
         break;
@@ -226,3 +253,4 @@ function micMessage(e: unknown): string {
 }
 
 export const voice = new VoiceController();
+if (typeof window !== 'undefined') voice.attach();

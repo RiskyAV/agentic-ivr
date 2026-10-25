@@ -1,27 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { PcmPlayer, type PlayerBackend } from './player';
-
-/** A manual clock plus fake scheduled sources: no real audio. */
-class FakeBackend implements PlayerBackend {
-  t = 0;
-  sources: { startAt: number; samples: number; stopped: boolean; started: boolean; ended: boolean; cb: { onStart?: () => void; onEnd: () => void } }[] = [];
-  now() { return this.t; }
-  schedule(pcm: Int16Array, startAt: number, cb: { onStart?: () => void; onEnd: () => void }) {
-    const s = { startAt, samples: pcm.length, stopped: false, started: false, ended: false, cb };
-    this.sources.push(s);
-    return { stop: () => { s.stopped = true; } };
-  }
-  close() {}
-  /** Moves the clock, firing start/end callbacks of sources that are not stopped. */
-  advance(to: number, rate = 24000) {
-    this.t = to;
-    for (const s of this.sources) {
-      if (s.stopped) continue;
-      if (!s.started && s.startAt <= to) { s.started = true; s.cb.onStart?.(); }
-      if (!s.ended && s.startAt + s.samples / rate <= to) { s.ended = true; s.cb.onEnd(); }
-    }
-  }
-}
+import { FakeBackend } from './fakes';
+import { PcmPlayer } from './player';
 
 const frame = (ms: number) => new Uint8Array(Math.round((ms / 1000) * 24000) * 2);
 
@@ -135,5 +114,25 @@ describe('PcmPlayer', () => {
     p.begin(4);
     p.end(4);
     expect(idle).toEqual([]);
+  });
+
+  it('flushAll reports every audible utterance: the filler with its played ms and the queued answer with 0', () => {
+    const b = new FakeBackend();
+    const p = new PcmPlayer(24000, b);
+    p.enqueue(1, frame(1000)); // filler: 0.06..1.06
+    p.enqueue(2, frame(500)); // answer queued behind it
+    b.advance(0.56);
+    expect(p.flushAll()).toEqual([{ turnSeq: 1, playedMs: 500 }, { turnSeq: 2, playedMs: 0 }]);
+    expect(b.sources.every((s) => s.stopped)).toBe(true);
+  });
+
+  it('flushAll skips utterances already reported as fully played and ones with no audio', () => {
+    const b = new FakeBackend();
+    const p = new PcmPlayer(24000, b);
+    p.enqueue(1, frame(100));
+    p.end(1);
+    b.advance(1); // idle report sent for 1
+    p.begin(2); // no audio
+    expect(p.flushAll()).toEqual([]);
   });
 });
