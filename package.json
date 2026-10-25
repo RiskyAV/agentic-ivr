@@ -5,7 +5,7 @@
   "engines": { "node": ">=22" },
   "workspaces": ["packages/*", "apps/*"],
   "scripts": {
-    "dev": "concurrently -n mocks,server,web -c blue,green,magenta \"tsx watch apps/mock-systems/src/main.ts\" \"tsx watch apps/server/src/main.ts\" \"npm run dev -w @app/web\"",
+    "dev": "concurrently -n mocks,server -c blue,green \"tsx watch apps/mock-systems/src/main.ts\" \"tsx watch apps/server/src/main.ts\"",
     "test": "vitest run",
     "build": "tsc -b && npm run build -w @app/web"
   },

@@ -25,6 +25,7 @@ export interface SessionStore {
   get(id: string): Session | undefined;
   put(s: Session): void;
   delete(id: string): void;
+  size(): number;
   /** Deletes sessions idle for longer than `idleMs`; returns how many were removed. */
   sweep(idleMs: number): number;
 }
@@ -35,6 +36,7 @@ export class InMemorySessionStore implements SessionStore {
   get(id: string) { return this.m.get(id); }
   put(s: Session) { this.m.set(s.id, s); }
   delete(id: string) { this.m.delete(id); }
+  size() { return this.m.size; }
   sweep(idleMs: number): number {
     const cutoff = this.now() - idleMs;
     let n = 0;

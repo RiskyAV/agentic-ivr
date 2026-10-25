@@ -1,0 +1,104 @@
+import Fastify, { type FastifyInstance } from 'fastify';
+import { DEMO_CUSTOMERS } from '@app/mock-systems';
+import { ActionService } from './platform/actions/actionService.js';
+import { AuditLog } from './platform/actions/audit.js';
+import { buildConnectors } from './platform/connectors/clients.js';
+import { fetchTransport } from './platform/connectors/transport.js';
+import { InMemorySessionStore, type SessionStore } from './platform/context/session.js';
+import { Engine } from './platform/engine/engine.js';
+import { Guard } from './platform/guard/guard.js';
+import { GeminiClient } from './platform/llm/gemini.js';
+import { Limiter } from './platform/llm/limiter.js';
+import { DEFAULT_STUB_RULES } from './platform/llm/defaultStubRules.js';
+import { StubLlm } from './platform/llm/stub.js';
+import type { LlmClient } from './platform/llm/types.js';
+import { EventLog } from './platform/telemetry/eventLog.js';
+import { Metrics } from './platform/telemetry/metrics.js';
+import { ToolRegistry } from './platform/tools/registry.js';
+import { WorkflowRegistry } from './platform/workflows/registry.js';
+import { loanServicingActions } from './workflows/loan-servicing/actions.js';
+import { loanServicing } from './workflows/loan-servicing/index.js';
+import { loanServicingTools } from './workflows/loan-servicing/tools.js';
+import type { Config } from './config.js';
+import type { GatewayCtx } from './gateway/context.js';
+import { registerHttp } from './gateway/http.js';
+import { RateLimiter } from './gateway/rateLimit.js';
+import { attachWs, SESSION_IDLE_MS, SWEEP_EVERY_MS } from './gateway/ws.js';
+
+export interface AppOptions {
+  /** Replaces the LLM chosen by config (tests). */
+  llm?: LlmClient;
+  /** Injectable clock for session and rate-limit logic (tests). */
+  now?: () => number;
+}
+
+export interface AppHandle {
+  app: FastifyInstance;
+  llm: LlmClient;
+  sessions: SessionStore;
+  ctx: GatewayCtx;
+  /** Listens and returns the bound port (pass 0 for an ephemeral one). */
+  listen(port?: number, host?: string): Promise<number>;
+  close(): Promise<void>;
+}
+
+/** Wires config into connectors, tools, actions, engine, guard, sessions and the HTTP/WebSocket gateway. */
+export async function buildApp(config: Config, opts: AppOptions = {}): Promise<AppHandle> {
+  const now = opts.now ?? (() => Date.now());
+  const llm: LlmClient =
+    opts.llm ??
+    (config.llmProvider === 'gemini' ? new GeminiClient(config.geminiApiKey!, config.model) : new StubLlm(DEFAULT_STUB_RULES));
+  // Under the stub there is no classifier model: the guard keeps its rules and the model step always allows.
+  const guardLlm: LlmClient =
+    config.llmProvider === 'stub' && !opts.llm
+      ? new StubLlm([{ match: /[\s\S]*/, script: [[{ type: 'text', text: '{"verdict":"allow"}' }]] }])
+      : llm;
+
+  const connectors = buildConnectors(fetchTransport(config.mockBaseUrl));
+  const audit = new AuditLog();
+  const actions = new ActionService(loanServicingActions, audit);
+  const tools = new ToolRegistry();
+  for (const t of loanServicingTools) tools.register(t);
+  for (const a of loanServicingActions) tools.register(actions.proposeTool(a.type));
+  const workflows = new WorkflowRegistry().register(loanServicing);
+  const eventLog = new EventLog(config.eventLogDir);
+  const metrics = new Metrics();
+  const limiter = new Limiter(config.llmMaxConcurrency, config.llmQueueTimeoutMs);
+  const sessions = new InMemorySessionStore(now);
+  const engine = new Engine({
+    llm, limiter, tools, actions, workflows, connectors, eventLog, metrics, audit,
+    guard: new Guard(guardLlm, config.guardModel),
+    demoCustomerNames: DEMO_CUSTOMERS.map((c) => c.name),
+    config: config.engine,
+  });
+
+  const ctx: GatewayCtx = {
+    config, now, sessions, engine, actions, audit, connectors, workflows, metrics, limiter, eventLog,
+    loginLimiter: new RateLimiter(config.loginsPerMin, 60_000, now),
+    turnLimiter: new RateLimiter(config.turnsPerMin, 60_000, now),
+    voiceSessions: () => 0,
+  };
+
+  const app = Fastify({ logger: false });
+  registerHttp(app, ctx);
+  const ws = attachWs(app.server, ctx);
+  const sweep = setInterval(() => {
+    ws.touchLive();
+    sessions.sweep(SESSION_IDLE_MS);
+  }, SWEEP_EVERY_MS);
+  sweep.unref();
+
+  return {
+    app, llm, sessions, ctx,
+    async listen(port = config.port, host = '0.0.0.0') {
+      await app.listen({ port, host });
+      return (app.server.address() as { port: number }).port;
+    },
+    async close() {
+      clearInterval(sweep);
+      await ws.close();
+      await app.close();
+      metrics.dispose();
+    },
+  };
+}

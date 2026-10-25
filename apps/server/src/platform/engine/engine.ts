@@ -82,8 +82,11 @@ export const defaultRefusal: RefusalFn = refusalFor;
 
 export function engineConfigFromEnv(env: Record<string, string | undefined> = process.env): EngineConfig {
   const budget = Number(env.TURN_BUDGET_MS);
+  const guardWait = Number(env.GUARD_WAIT_MS);
   return {
     turnBudgetMs: Number.isFinite(budget) && budget > 0 ? budget : 9000,
+    // The classifier takes about 1.0-1.4 s, so the default leaves headroom over the engine's built-in 1500.
+    guardWaitMs: env.GUARD_WAIT_MS && Number.isFinite(guardWait) && guardWait > 0 ? guardWait : 2000,
     maxToolRounds: 4,
     toolTimeoutMs: 4000,
     ...(env.GEMINI_MODEL && { model: env.GEMINI_MODEL }),

@@ -8,10 +8,12 @@
     "@app/shared": "*",
     "@google/genai": "^2.31.0",
     "fastify": "^5.12.7",
+    "ws": "^8.22.0",
     "zod": "^3.25.76",
     "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
-    "@app/mock-systems": "*"
+    "@app/mock-systems": "*",
+    "@types/ws": "^8.18.2"
   }
 }
