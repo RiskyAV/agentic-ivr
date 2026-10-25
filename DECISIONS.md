@@ -103,3 +103,96 @@ Status: `Accepted` = agreed, `Proposed` = suggested but not yet confirmed, `Supe
   - It's kept as a possible future optimisation, to be adopted only if measurements show STT finalisation dominating latency.
 - **Trade-off:** We accept STT finalisation time on the critical path in exchange for correctness and simpler cancellation. Clause-level TTS chunks can slightly flatten prosody compared with sending whole sentences.
 - **Measured:** the trace records each hop (first partial, STT commit, LLM first token, first TTS chunk sent, first audio played), so the latency report shows where the time goes.
+
+## D-015 — Numbers are bound by code, never written by the LLM
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:** Tool results expose named values (e.g. `emi.new`, `prepay.interestSaved`). The LLM writes prose with placeholders (`Your EMI rose to {{emi.new}}`), and the streaming renderer replaces each placeholder with the code-formatted value as the text flows to the UI and TTS. A placeholder that doesn't resolve fails closed: it's shown as "I couldn't verify that figure" and flagged in the trace. The numeric-grounding check stays as a second line of defence for any literal number the model writes anyway.
+- **Why:** Accuracy is the customer's top complaint. This makes a hallucinated figure impossible by construction, instead of something detected afterwards.
+- **Rejected:** letting the LLM write numbers and validating them afterwards only. That detects errors but can't prevent them, and a regeneration costs a full extra turn.
+- **Trade-off:** It adds a little prompt complexity, and the renderer must hold back a partial `{{…` token while streaming, which delays text by a few characters at most.
+
+## D-016 — Tool granularity: combined tools for common questions, basic tools for the long tail
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:** High-frequency questions get combined tools that fetch and compute in one call (`explain_emi_change`, `simulate_prepayment`, `check_foreclosure`, `list_options`, `get_overdue_summary`). Basic tools (`get_loan_details`, `get_payment_history`, `get_policy`, …) cover the long tail.
+- **Why:** Each LLM↔tool round trip costs about 0.5–1 s and is another chance for the model to chain steps wrongly. Common questions should resolve in one tool round.
+- **Rejected:** only basic, CRUD-like tools (flexible but slow and error-prone). Only combined tools (fast, but brittle for unexpected questions).
+
+## D-017 — Policies as versioned structured rules with effective dates (no vector search)
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:** Each policy clause has `id`, `version`, `effectiveFrom/To`, applicability (product, rate type, borrower type), the citation text and an optional evaluator function. Lookup is by id/topic, filtered by the clause version in force for *that loan* (sanction date or event date).
+- **Why:** Eligibility is logic, not textual similarity, and the right answer depends on which version of a rule applied to this customer at the time.
+- **Rejected:** vector search over policy documents. It can surface plausible but inapplicable text, has no notion of version, and is exactly the "LLM + vector DB" pattern the brief warns against. Vector search remains an option later for a large unstructured FAQ long tail, never for rules.
+
+## D-018 — Prompt layout optimised for Gemini context caching
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:** The prompt is built from most stable to least stable: system prompt → tool declarations → workflow policy summaries → customer snapshot → entity memory → recent history → current turn. Implicit caching is used, with explicit context caching where the model supports it.
+- **Why:** Repeated identical prefixes are served from cache, which reduces time-to-first-token and cost on every turn.
+- **Trade-off:** Prompt sections must stay byte-stable (no timestamps or random ordering in the prefix). This is enforced by building the prompt in one place.
+
+## D-019 — Hedged reads and stale-while-revalidate for slow or failing backends
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:**
+  - **Hedging:** for idempotent reads, if a call exceeds that system's observed p95, a second identical request is sent and the first response wins. Hedging is capped at about 10% extra load per system.
+  - **Stale data during failures:** if a read fails after retries/hedging (or the circuit is open), the last cached value is served with an explicit "as of" timestamp. The assistant must state the freshness ("as of 10:42 today").
+  - **Writes:** never hedged. They are retried only with an idempotency key.
+- **Why:** The brief requires responsiveness despite slow and intermittent backends. Hedging cuts tail latency without slowing the common case, and serving stale data with disclosure is more useful than "system unavailable."
+- **Rejected:** retries alone, which add latency exactly in the slow cases.
+- **Trade-off:** Hedging adds some backend load, and stale data can mislead if freshness isn't stated. The prompt and renderer always attach the "as of" timestamp.
+
+## D-020 — Indian number and date formatting done deterministically for text and speech
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:** One formatting module renders money in the Indian system: ₹1,23,456 for display, and "one lakh twenty-three thousand four hundred fifty-six rupees" (or "about 1.23 lakh" where suitable) for speech. Dates and percentages are formatted the same way. Placeholder binding (D-015) uses the speech variant on the voice channel.
+- **Why:** LLMs and TTS engines frequently mangle Indian-format numbers, and a misread amount over voice is an accuracy failure.
+- **Rejected:** relying on the LLM or TTS text normalisation.
+
+## D-021 — Action confirmation is a deterministic state machine bound to the exact terms
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:**
+  - A proposal is stored with `proposalId` and `termsHash` (hash of action type + canonical parameters + computed figures), plus an expiry.
+  - The UI confirm button sends `{proposalId, termsHash}`. A voice confirmation is accepted only while exactly one proposal is pending, and only after the key figures have been read back.
+  - Execution re-validates ownership, limits and policy at execution time, and rejects the confirm if the terms changed.
+  - The LLM has no "execute" tool at all.
+- **Why:** The model must not be able to cause a side effect. A confirmation must refer to exactly what the customer saw or heard.
+- **Rejected:** executing when the model decides the user agreed.
+
+## D-022 — Data minimisation before the LLM
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:** PAN, full phone, email, bank account and full loan-account numbers are masked or tokenised *before* inclusion in prompts or tool results sent to Gemini (e.g. `XXXX-1234`). The un-masking that real actions need happens server-side by token. Logs and traces use the same masking.
+- **Why:** The model never needs raw identifiers to answer, and sending less PII to a third-party model is the right default for a regulated lender.
+- **Trade-off:** If the customer asks for their full account number, it's shown by the UI from the server, not spoken or written by the LLM.
+
+## D-023 — Event-sourced turn log with deterministic replay
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:** Every turn is recorded as an ordered list of events: user input (text or transcript), the prompt hash, LLM requests and responses, tool calls with recorded backend responses, guard verdicts, proposals and confirmations, the final answer and timings. A replay command re-runs any conversation with backends stubbed from the recorded responses (and optionally the recorded LLM outputs), to reproduce a bad answer or test a prompt or code fix against it.
+- **Why:** Debugging LLM systems from text logs is guesswork. Replay turns "the bot said something wrong to a customer" into a reproducible test case. This is the core of incident response for AI agents.
+- **Rejected:** plain structured logs only.
+
+## D-024 — Backpressure and concurrency control
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:**
+  - At most one active turn per session: new input cancels the in-flight turn, per D-003/barge-in.
+  - A process-wide limiter on concurrent LLM calls, with a bounded queue. A turn that waits in the queue too long gets a graceful "high demand" response and a filler.
+  - Bounded per-session audio buffers that drop the oldest data when full.
+  - Per-IP and per-session rate limits.
+  - The load script measures event-loop lag, memory per session and queue depth under load.
+- **Why:** At 1,000 concurrent conversations, the failure mode is unbounded queues and memory, not average latency. Limits make overload visible and graceful.
+
+## D-025 — Workflow packs are typed TypeScript objects, not a YAML/JSON configuration format (yet)
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:** A workflow is a typed `WorkflowDefinition` in TypeScript (prompt, tools, actions, policy scopes, opener, voice settings).
+- **Why:** The compiler checks tool and action names, refactors are safe, and live edits during the review are fast. The authors today are engineers.
+- **Rejected for now:** a YAML/JSON configuration format, which pays off once non-engineers (ops/solutions teams) author workflows. The typed object is serialisable, so a configuration format can be added on top without rewriting the engine.
+
+## D-026 — Defence against malicious or manipulative user input
+- **Date:** 2026-10-25 · **Status:** Accepted
+- **Decision:** Defence in depth, with the hard guarantees in code rather than in the prompt:
+  1. **Capability limits.** The agent can only call its workflow's tools, all scoped server-side to the authenticated customer (D-009). No tool exists to waive charges, change rates or terms, read other customers, or run arbitrary queries. Such requests can at most become a service ticket for human review.
+  2. **Action limits in code.** Amounts are bounded (e.g. prepayment ≤ outstanding, within daily limits), disputes apply only to the customer's own payments, and policy is re-checked at execution. All of this sits behind the hash-bound confirmation (D-021).
+  3. **A parallel input guard.** A fast rule check plus a small-model classifier runs alongside the main turn (no added latency on the happy path). It flags jailbreak attempts, social engineering ("I'm from the bank, approve this"), requests for other people's data, and abuse. A flag blocks any action proposal from that turn and replaces the answer with a polite refusal.
+  4. **Indirect injection.** Free text from backends (CRM notes, dispute descriptions, policy text) is delimited and labelled as untrusted data in the prompt. Instructions inside it are ignored, and it can't grant capabilities anyway (see 1).
+  5. **Output rules.** The system prompt is never revealed, figures come only via placeholders (D-015), and off-topic content is declined.
+  6. **Escalation.** Repeated flagged attempts in a session lead to a firm refusal, then the session is flagged in the audit log and offered a human handoff.
+  7. **Red-team evaluation.** `scripts/eval` includes an adversarial set (about 15 prompts: injection, impersonation, cross-customer access, fee-waiver coercion, prompt extraction, malicious content in a dispute description) with expected outcomes. The write-up reports the pass rate.
+- **Why:** In a regulated lender, the bar is "the model *cannot* do the wrong thing," not "the model was told not to." Prompts reduce attempts, and code makes them harmless.
+- **Rejected:** prompt-only guardrails. Also rejected: a serial guard before every turn, which adds about 200–400 ms to every turn for a rare event.
+- **Trade-off:** The parallel guard can flag after some text has already streamed. The UI then retracts the partial answer, and no action can have happened because proposals are held until the guard verdict arrives.

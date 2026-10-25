@@ -320,3 +320,30 @@ Redis/Memorystore for sessions and the breaker/caches. Sticky WS routing at the 
 6. Collections pack
 7. bench/eval/load scripts + write-up
 8. Deploy
+
+---
+
+## 12. Additional engineering decisions (D-015 – D-026)
+
+These refine the components above. Where they conflict with earlier text, this section wins. The full rationale and rejected alternatives are in `DECISIONS.md`.
+
+| # | Decision | Where it lands |
+|---|---|---|
+| D-015 | **Placeholder binding:** the LLM writes `{{name}}`, and code injects formatted values while streaming. An unresolved placeholder fails closed. The numeric check (5.2 step 5) stays as a second line of defence. | `platform/grounding/renderer.ts`. Tool results return `values: Record<string, Money\|Pct\|Date\|…>` alongside `data` and `sources`. |
+| D-016 | **Combined tools for common questions + basic tools for the long tail** (the 5.3 list already reflects this; `get_overdue_summary` is combined). | Workflow tool files |
+| D-017 | **Versioned policy clauses** with `version`, `effectiveFrom/To` and applicability. Selection is by the loan's relevant date. | `domain/policy/` + Policy mock |
+| D-018 | **Prompt built from most to least stable** for context caching. A single prompt builder, with no volatile data in the prefix. | `platform/engine/prompts.ts` |
+| D-019 | **Hedged reads** after the p95 latency (capped at about 10%), and **stale-while-revalidate** with a mandatory "as of" disclosure. Writes are never hedged. | `platform/connectors/resilientClient.ts` |
+| D-020 | **Indian number and date formatting** (lakh/crore, display vs speech variants). | `platform/format/inr.ts`, used by the renderer |
+| D-021 | **Confirmation state machine:** `proposalId + termsHash + expiry`, read-back before voice confirm, re-validation at execution. No execute tool exists. | `platform/actions/` |
+| D-022 | **PII masked/tokenised before the LLM**, with un-masking server-side. | `platform/context/redact.ts` |
+| D-023 | **Event-sourced turn log + replay command** (`npm run replay -- <sessionId> [--turn n] [--live-llm]`). Events are persisted as JSONL in `./data/sessions/` for the PoC. | `platform/telemetry/eventLog.ts`, `scripts/replay` |
+| D-024 | **Backpressure:** one turn per session, a global LLM concurrency limiter with a bounded queue and "high demand" fallback, bounded audio buffers, rate limits. | `gateway/`, `platform/engine/limiter.ts` |
+| D-025 | **Workflow packs as typed TypeScript** (as in 5.1). The definition stays serialisable. | `platform/workflows/types.ts` |
+| D-026 | **Malicious-input defence:** capability limits, action limits in code, a **parallel** input guard (rules + small-model classifier) whose verdict gates proposals and can retract the streamed text, delimited untrusted backend text, escalation after repeated attempts, and a **red-team eval set** (about 15 cases) with the pass rate reported. | `platform/guard/`, `scripts/eval/redteam.ts` |
+
+**Effect on the rest of the design:**
+- Proposals emitted during a turn are **held until the guard verdict arrives** (normally well before the LLM finishes).
+- The voice channel uses the speech variants from D-020.
+- The latency report adds hedge rate, stale-served count and guard latency.
+- The cut line is unchanged. D-015, D-019, D-021, D-023 and D-026 are **never cut**. The small-model guard classifier can drop back to rules-only if time is short.
