@@ -49,8 +49,10 @@ export function registerHttp(app: FastifyInstance, ctx: GatewayCtx): void {
   app.addHook('onRequest', async (req, reply) => {
     const code = ctx.config.demoAccessCode;
     if (!code) return;
-    const path = req.url.split('?')[0];
-    if (!path?.startsWith('/api/') || path === '/api/health' || path === '/api/login') return;
+    // Decide on the matched route pattern, never the raw URL (Fastify decodes %xx before routing). Unmatched requests 404.
+    const route = req.routeOptions.url;
+    if (!route?.startsWith('/api/')) return;
+    if ((req.method === 'GET' && route === '/api/health') || (req.method === 'POST' && route === '/api/login')) return;
     const h = req.headers['x-access-code'];
     if (typeof h === 'string' && timingSafeEqual(sha(h), sha(code))) return;
     const t = bearer(req.headers.authorization);

@@ -199,6 +199,13 @@ describe('HTTP', () => {
     expect((await fetch(`${g.base}/api/workflows`, { headers: { authorization: 'Bearer forged.token' } })).status).toBe(401);
     const pre = await fetch(`${g.base}/api/workflows`, { method: 'OPTIONS', headers: { origin: 'http://localhost:5173' } });
     expect(pre.status).toBe(204);
+    for (const path of ['/%61pi/workflows', '/%61pi/metrics', '/api%2Fworkflows', '/api/workflows/', '/%41pi/workflows', '/ap%49/workflows', '/api/%77orkflows', '/api/workflows?x=1']) {
+      const r = await fetch(`${g.base}${path}`);
+      expect([401, 404], path).toContain(r.status);
+    }
+    expect((await fetch(`${g.base}/%61pi/workflows`)).status).not.toBe(200);
+    expect((await fetch(`${g.base}/api/workflows`, { method: 'HEAD' })).status).toBe(401);
+    expect((await fetch(`${g.base}/api/workflows`, { method: 'HEAD', headers: code })).status).toBe(200);
     // No gate when no code is configured.
     expect((await fetch(`${base}/api/workflows`)).status).toBe(200);
   });

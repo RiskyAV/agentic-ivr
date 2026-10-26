@@ -13,7 +13,7 @@ export async function safeEqual(a: string, b: string): Promise<boolean> {
   const [da, db] = await Promise.all([crypto.subtle.digest('SHA-256', enc.encode(a)), crypto.subtle.digest('SHA-256', enc.encode(b))]);
   const x = new Uint8Array(da);
   const y = new Uint8Array(db);
-  let diff = x.length ^ y.length;
+  let diff = 0;
   for (let i = 0; i < x.length; i++) diff |= (x[i] ?? 0) ^ (y[i] ?? 0);
   return diff === 0;
 }
