@@ -96,6 +96,9 @@ echo "--> kernel link protections and systemd-run"
 [ "$(sysctl -n fs.protected_hardlinks)" = 1 ] || { echo "fs.protected_hardlinks must be 1 (sysctl -w fs.protected_hardlinks=1)" >&2; exit 1; }
 [ "$(sysctl -n fs.protected_symlinks)" = 1 ] || { echo "fs.protected_symlinks must be 1 (sysctl -w fs.protected_symlinks=1)" >&2; exit 1; }
 command -v systemd-run >/dev/null || { echo "systemd-run is required (sandboxed builds)" >&2; exit 1; }
+# Units block the metadata server (169.254.169.254, also GCE's DNS) and builds block loopback except the resolved stub:
+# name resolution must go through systemd-resolved at 127.0.0.53.
+grep -Eq '^nameserver 127\.0\.0\.53' /etc/resolv.conf || { echo "/etc/resolv.conf must use the systemd-resolved stub (127.0.0.53)" >&2; exit 1; }
 
 echo "--> node and ports"
 [ -x /usr/bin/node ] || { echo "/usr/bin/node not found (units expect it)" >&2; exit 1; }

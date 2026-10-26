@@ -13,7 +13,9 @@
 #  - Extraction and `npm ci --omit=dev --ignore-scripts --git=/bin/false` (user/global npm config = empty root-owned files) run as
 #    the dedicated build user `loanbuild` in a transient systemd unit (`systemd-run --wait`): own cgroup killed at
 #    the end (KillMode=control-group), ProtectSystem=strict with the build dir as the only writable path,
-#    PrivateTmp, PrivateDevices, NoNewPrivileges, RestrictSUIDSGID, memory and runtime caps. Afterwards every
+#    PrivateTmp, PrivateDevices, PrivateIPC/RemoveIPC, NoNewPrivileges, RestrictSUIDSGID, memory and runtime caps,
+#    and no network access to the GCE metadata server or to any loopback service except the systemd-resolved stub
+#    (127.0.0.53, so npm can resolve the registry; IPAddressAllow takes precedence over IPAddressDeny). Afterwards every
 #    loanbuild process is killed and the script aborts if any survives, so build-time code cannot persist.
 #  - The build dir (loanbuild 700, holding the tree and a per-build npm cache that is discarded) lives under the
 #    root-owned 711 releases/.build, unreachable by the live app (loanpoc) and by loandeploy. After the kill, root
@@ -102,7 +104,8 @@ systemd-run --wait --pipe --collect --quiet --unit "loan-poc-build-$ID" \
   -p User="$BUILD_USER" -p Group="$BUILD_USER" -p WorkingDirectory="$T" \
   -p KillMode=control-group -p ProtectSystem=strict -p ProtectHome=yes -p PrivateTmp=yes -p PrivateDevices=yes \
   -p NoNewPrivileges=yes -p RestrictSUIDSGID=yes -p ReadWritePaths="$T" \
-  -p MemoryMax=1G -p RuntimeMaxSec=600 \
+  -p MemoryMax=1G -p RuntimeMaxSec=600 -p RemoveIPC=yes -p PrivateIPC=yes \
+  -p IPAddressDeny=169.254.169.254/32 -p "IPAddressDeny=127.0.0.0/8 ::1/128" -p IPAddressAllow=127.0.0.53/32 \
   -E LC_ALL=C -E HOME="$T" -E npm_config_cache="$T/npm-cache" \
   -E npm_config_userconfig="$NPMRC_DIR/user" -E npm_config_globalconfig="$NPMRC_DIR/global" -E npm_config_update_notifier=false \
   /bin/bash -c 'set -euo pipefail

@@ -174,7 +174,7 @@ It runs over `gcloud compute ssh` with your own account and `sudo`, and it is id
    - `loanbuild` (extracts and installs releases, no login shell);
    - `loandeploy` (password locked, shell `/bin/bash`, home `/var/lib/loandeploy`);
 2. creates `/opt/loan-poc/{releases,incoming,data}` (only `incoming/` belongs to `loandeploy`) and the deploy lock `/var/lib/loan-poc/deploy.lock` (`root:loandeploy 640`);
-3. checks Node 22 at `/usr/bin/node`, that `systemd-run` exists, that `fs.protected_hardlinks` and `fs.protected_symlinks` are 1, and that ports 4000/4100 are free or already ours;
+3. checks Node 22 at `/usr/bin/node`, that `systemd-run` exists, that DNS goes through the systemd-resolved stub (`nameserver 127.0.0.53`, because the units block 169.254.169.254, which is also GCE's DNS server), that `fs.protected_hardlinks` and `fs.protected_symlinks` are 1, and that ports 4000/4100 are free or already ours;
 4. installs the root-owned `/usr/local/sbin/loan-poc-activate` and `/usr/local/sbin/loan-poc-ssh-gate` (sources in `deploy/`);
 5. writes `/etc/sudoers.d/loan-poc-deploy`, validated with `visudo -cf`: `loandeploy` may run **only** `loan-poc-activate`, with NOPASSWD;
 6. writes the CI public key to `/var/lib/loandeploy/.ssh/authorized_keys` as `restrict,command="/usr/local/sbin/loan-poc-ssh-gate" ssh-ed25519 …`. The file and its directory are root-owned;
@@ -204,12 +204,14 @@ Re-run bootstrap whenever `deploy/*.service`, `deploy/nginx-api.conf` or the two
   - its own cgroup, killed at the end;
   - `ProtectSystem=strict`, with the build directory as the only writable path;
   - `PrivateTmp`, `PrivateDevices`, `NoNewPrivileges` and `RestrictSUIDSGID`;
-  - 1 GB of memory and 10 minutes of runtime.
+  - 1 GB of memory and 10 minutes of runtime;
+  - `PrivateIPC`/`RemoveIPC`;
+  - no network access to the metadata server or to loopback, except the DNS stub `127.0.0.53`.
 
   The build directory, which holds its own npm cache, cannot be reached by `loanpoc` (the live app) or `loandeploy`. Afterwards every `loanbuild` process is killed, and the deploy aborts if any survives. Root then locks the tree, aborts if any file has extra hardlinks, and changes ownership to root and the tree to read-only without following links. Only then is it moved into place. If a first deploy fails, it stops the units and removes the release. A later failure rolls back to the previous release.
 - It never installs units, nginx config or sudoers from the tarball.
 
-So a leaked key lets an attacker deploy arbitrary **application code that runs as `loanpoc`**. During a build, the attacker's archive also influences what `npm ci` does inside the sandbox as `loanbuild`, but nothing from the build outlives it: the processes are killed, the per-build cache is deleted, and the tree becomes root-owned. That application code can read `/opt/loan-poc/.env` (the app's API keys) and serve traffic on `api.sparsan.com`. It cannot get a shell as `loandeploy`, run other root commands, touch the `cohost` site, change nginx/systemd/sudoers, or read other users' files beyond what `loanpoc` can. **Recovery** if the key leaks:
+So a leaked key lets an attacker deploy arbitrary **application code that runs as `loanpoc`**. During a build, the attacker's archive also influences what `npm ci` does inside the sandbox as `loanbuild`, but nothing from the build outlives it: the processes are killed, the per-build cache is deleted, and the tree becomes root-owned. That application code can read `/opt/loan-poc/.env` (the app's API keys) and serve traffic on `api.sparsan.com`. Neither app code nor build code can reach the GCE metadata server (`IPAddressDeny=169.254.169.254`), so it cannot obtain the VM service account's tokens. The units also run with `ProtectSystem=strict` (only `/opt/loan-poc/data` is writable) and `RemoveIPC`. Build code also cannot reach loopback services (only the resolved DNS stub). **App code, however, can still reach other loopback services on this shared VM at the network level, for example the `cohost` backend on 127.0.0.1:3000.** It needs loopback to talk to its mocks, and isolating that would need a network namespace. For production, run this app on its own VM (or container host) rather than next to another site. It cannot get a shell as `loandeploy`, run other root commands, touch the `cohost` site, change nginx/systemd/sudoers, or read other users' files beyond what `loanpoc` can. **Recovery** if the key leaks:
 1. Rotate the key (below). This removes the key holder's only foothold, because no build-time process or cache survives a deploy.
 2. Redeploy a known-good commit, which replaces the attacker's app code.
 3. Rotate the secrets in `.env`, since attacker code running as `loanpoc` could have read them.

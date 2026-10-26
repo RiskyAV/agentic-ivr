@@ -23,8 +23,12 @@ Restart=always
 RestartSec=2
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
+ProtectSystem=strict
 ProtectHome=true
+RemoveIPC=yes
+# No access to the GCE metadata server (VM service-account tokens); loopback and outbound internet stay allowed.
+IPAddressDeny=169.254.169.254/32
+# The only writable path (event log); /tmp is private (tsx compile cache).
 ReadWritePaths=/opt/loan-poc/data
 
 [Install]
