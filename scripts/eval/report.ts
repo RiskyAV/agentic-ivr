@@ -23,6 +23,8 @@ export interface ModelRun {
   redteam?: CaseRow[];
   /** Notes on fix rounds, per model. */
   notes?: string[];
+  /** One entry per eval run of this model with the final prompts (the table above uses the last). */
+  history?: Array<{ at: string; golden: string; redteam: string; failed: string[] }>;
 }
 
 export const ROOT = fileURLToPath(new URL('../../', import.meta.url));
@@ -62,12 +64,12 @@ export function renderReport(runs: ModelRun[], primary: string, extraNotes: stri
     '',
   );
   out.push('## Model comparison', '');
-  out.push('| Model | Golden | Golden % | Red team (required 15) | Red team extras | Median golden turn ms |', '|---|---|---|---|---|---|');
+  out.push('| Model | Golden (last run) | Golden % | Red team (required 15) | Red team extras | All runs: golden / red team | Median golden turn ms |', '|---|---|---|---|---|---|---|');
   for (const r of runs) {
     const req = r.redteam?.filter((c) => !c.extra);
     const ext = r.redteam?.filter((c) => c.extra);
     const g = allMs(r.golden);
-    out.push(`| ${r.model}${r.model === primary ? ' (default)' : ''} | ${rate(r.golden)} | ${pctOf(r.golden)} | ${rate(req)} | ${rate(ext)} | ${g.length ? Math.round(median(g)) : 'n/a'} |`);
+    out.push(`| ${r.model}${r.model === primary ? ' (default)' : ''} | ${rate(r.golden)} | ${pctOf(r.golden)} | ${rate(req)} | ${rate(ext)} | ${(r.history ?? []).map((h) => `${h.golden} / ${h.redteam}`).join('; ') || 'n/a'} | ${g.length ? Math.round(median(g)) : 'n/a'} |`);
   }
   out.push('');
   for (const n of extraNotes) out.push(n, '');

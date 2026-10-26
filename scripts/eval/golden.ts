@@ -61,7 +61,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     }
     const prev = loadRuns().find((r) => r.model === model);
     // A partial run (--only / --case) keeps the other half of the previous run.
-    saveRun({ ...prev, ...run, golden: run.golden ?? prev?.golden, redteam: run.redteam ?? prev?.redteam, ...(prev?.notes && { notes: prev.notes }) } as ModelRun);
+    const golden = run.golden ?? prev?.golden;
+    const redteam = run.redteam ?? prev?.redteam;
+    const sum = (rows?: CaseRow[], extra = false) => (rows ? `${rows.filter((r) => (r.extra ?? false) === extra && r.pass).length}/${rows.filter((r) => (r.extra ?? false) === extra).length}` : 'n/a');
+    const failed = [...(golden ?? []), ...(redteam ?? [])].filter((r) => !r.pass).map((r) => r.id);
+    const history = [...(prev?.history ?? []), ...(arg('case') || only ? [] : [{ at: run.at, golden: sum(golden), redteam: sum(redteam), failed }])];
+    saveRun({ ...prev, ...run, golden, redteam, history, ...(prev?.notes && { notes: prev.notes }) } as ModelRun);
   }
   const runs = loadRuns();
   const path = writeReport(runs, arg('primary', model)!);

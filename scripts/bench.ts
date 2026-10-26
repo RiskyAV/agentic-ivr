@@ -99,8 +99,7 @@ export function addTurn(s: Samples, journey: string, t: TurnResult): void {
       s.backendCalls++;
       if (sp.attrs?.hedged === true) s.hedged++;
       if (sp.attrs?.outcome === 'stale') s.stale++;
-      if (typeof sp.attrs?.attempt === 'number' && sp.attrs.attempt > 0) s.retried++;
-      if (sp.attrs?.outcome && sp.attrs.outcome !== 'ok' && sp.attrs.outcome !== 'stale') s.failedCalls++;
+          if (sp.attrs?.outcome && sp.attrs.outcome !== 'ok' && sp.attrs.outcome !== 'stale') s.failedCalls++;
     }
   }
   const total = m.turn_total ?? 0;
@@ -115,7 +114,7 @@ export function addTurn(s: Samples, journey: string, t: TurnResult): void {
 }
 
 const fmt = (n: number) => (Number.isFinite(n) ? String(Math.round(n)) : 'n/a');
-const row = (name: string, v: number[]) => `| ${name} | ${v.length} | ${fmt(percentile(v, 0.5))} | ${fmt(percentile(v, 0.95))} | ${fmt(Math.max(...v, NaN))} |`;
+const row = (name: string, v: number[]) => `| ${name} | ${v.length} | ${fmt(percentile(v, 0.5))} | ${fmt(percentile(v, 0.95))} | ${fmt(v.length ? Math.max(...v) : NaN)} |`;
 const head = '| Metric | n | p50 | p95 | max |\n|---|---|---|---|---|';
 const pctText = (x: number, d: number) => (d ? `${(100 * x / d).toFixed(1)}%` : 'n/a');
 
@@ -133,7 +132,7 @@ export function renderStats(s: Samples, runs: number): string {
   return [
     `${runs} runs of each journey (${s.turns} turns).`, '', lines.join('\n'), '',
     '**Resilience counters**', '',
-    `- Backend calls: ${s.backendCalls}; hedged: ${s.hedged} (${pctText(s.hedged, s.backendCalls)}); retried (attempt > 0): ${s.retried}; failed or timed out: ${s.failedCalls}; stale-served: ${s.stale}.`,
+    `- Backend calls: ${s.backendCalls}; hedged: ${s.hedged} (${pctText(s.hedged, s.backendCalls)}); failed or timed out: ${s.failedCalls}; stale-served: ${s.stale}.`,
     `- Guard timeouts (no verdict within the wait): ${s.guardTimeouts}; turns that ended degraded: ${s.degraded} of ${s.turns}.`, '',
     '**turn_total by journey (server, per turn)**', '', '| Journey | turns | p50 | p95 |\n|---|---|---|---|', ...j,
     ...(s.errors.length ? ['', `Runner errors (${s.errors.length}): ${[...new Set(s.errors)].slice(0, 5).join('; ')}`] : []),
@@ -175,7 +174,7 @@ export async function runBench(base: string, runs: number, chaos?: ChaosSettings
 
 const BENCH_DIR = join(ROOT, '.data/bench');
 
-function renderModelComparison(): string {
+export function renderModelComparison(): string {
   const files = (() => { try { return readdirSync(BENCH_DIR).filter((f) => f.startsWith('model-') && f.endsWith('.json')); } catch { return []; } })();
   const benches = files.map((f) => JSON.parse(readFileSync(join(BENCH_DIR, f), 'utf8')) as { model: string; runs: number; samples: Samples });
   const evalDir = join(ROOT, '.data/eval');
@@ -183,13 +182,14 @@ function renderModelComparison(): string {
   try { for (const f of readdirSync(evalDir)) { const d = JSON.parse(readFileSync(join(evalDir, f), 'utf8')) as { model: string }; evals[d.model] = d as never; } } catch { /* none yet */ }
   const lines = [
     `Same four journeys (${benches[0]?.runs ?? 5} runs each, real Gemini, default backend latencies); the guard model is gemini-3.5-flash-lite for all rows. Accuracy is from the final iteration of the golden and red-team evals (docs/eval-report.md).`, '',
-    '| Model | Golden | Red team | llm_first_token p50 / p95 | turn_total p50 / p95 | J1 p50 / p95 | J2 p50 / p95 | J3 p50 / p95 | J4 p50 / p95 | degraded turns |',
+    '| Model | Golden (3 runs) | Red team (required 15 + extras) | llm_first_token p50 / p95 | turn_total p50 / p95 | J1 p50 / p95 | J2 p50 / p95 | J3 p50 / p95 | J4 p50 / p95 | degraded turns |',
     '|---|---|---|---|---|---|---|---|---|---|',
   ];
   for (const b of benches.sort((a, c) => a.model.localeCompare(c.model))) {
     const e = evals[b.model];
-    const g = e?.golden ? `${e.golden.filter((x) => x.pass).length}/${e.golden.length}` : 'n/a';
-    const rt = e?.redteam ? `${e.redteam.filter((x) => x.pass && !x.extra).length}/${e.redteam.filter((x) => !x.extra).length}` : 'n/a';
+    const hist = (e as { history?: Array<{ golden: string; redteam: string }> } | undefined)?.history ?? [];
+    const g = hist.length ? hist.map((h) => h.golden).join(', ') : 'n/a';
+    const rt = hist.length ? hist.map((h) => h.redteam).join(', ') : 'n/a';
     const pp = (v: number[]) => `${fmt(percentile(v, 0.5))} / ${fmt(percentile(v, 0.95))}`;
     const j = (id: string) => pp(b.samples.journey[id] ?? []);
     lines.push(`| ${b.model} | ${g} | ${rt} | ${pp(b.samples.llm_first_token)} | ${pp(b.samples.turn_total)} | ${j('J1')} | ${j('J2')} | ${j('J3')} | ${j('J4')} | ${b.samples.degraded}/${b.samples.turns} |`);

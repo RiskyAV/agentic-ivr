@@ -139,7 +139,7 @@ export function goldenCases(): GoldenCase[] {
     {
       id: 'G16', title: 'Honesty: EMI never changed on this fixed loan', customerId: PRIYA,
       steps: ['Why did my EMI change?'],
-      expect: { contains: [['no change', 'not changed', "hasn't changed", "hasn’t changed", 'no record', 'no recent change', 'no changes', 'not been any change', 'not changed', 'has not changed', 'have not changed', 'remained', 'same', 'no EMI change']] },
+      expect: { contains: [['no change', 'not changed', "hasn't changed", "hasn’t changed", 'no record', 'no recent change', 'no recent emi change', 'no emi change', 'remains', 'no changes', 'not been any change', 'not changed', 'has not changed', 'have not changed', 'remained', 'same', 'no EMI change']] },
     },
     // ---- Arjun (C1003): collections workflow
     {

@@ -168,7 +168,7 @@ export function renderLoad(r: LoadResult, label: string): string {
     `**${label}**`, '',
     `- Setup: ${r.sessions} sessions x ${r.turns} turns over WebSocket, stub LLM with ${r.stubDelay} ms per chunk-step (an ideal turn is about ${r.idealTurnMs} ms: three chunk-steps), LLM concurrency limit ${r.llmConcurrency}, think time 0 to 2x the configured mean between turns. ${r.connected}/${r.sessions} sessions connected.`,
     `- Turns: ${r.completedTurns} completed, ${r.failedTurns} failed, ${r.highDemand} answered with the "very high demand" message (limiter queue timeout). Wall time ${r.wallSec.toFixed(1)} s.`,
-    `- Turn latency, client send to answer: p50 ${f(percentile(c, 0.5))} ms, p95 ${f(percentile(c, 0.95))} ms, max ${f(Math.max(...c, NaN))} ms. Server turn_total: p50 ${f(percentile(s, 0.5))} ms, p95 ${f(percentile(s, 0.95))} ms.`,
+    `- Turn latency, client send to answer: p50 ${f(percentile(c, 0.5))} ms, p95 ${f(percentile(c, 0.95))} ms, max ${f(c.length ? Math.max(...c) : NaN)} ms. Server turn_total: p50 ${f(percentile(s, 0.5))} ms, p95 ${f(percentile(s, 0.95))} ms.`,
     `- llm_first_token (includes limiter wait): p50 ${f(llmFirst?.p50 ?? NaN)} ms, p95 ${f(llmFirst?.p95 ?? NaN)} ms.`,
     `- Limiter: peak active ${r.peakActive}, peak queued ${r.peakQueued}.`,
     `- Event-loop lag p99 (cumulative histogram of the server process): peak ${r.lagMax.toFixed(1)} ms, at the end ${r.lagLast.toFixed(1)} ms.`,
