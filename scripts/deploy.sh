@@ -3,7 +3,7 @@
 #
 #   scripts/deploy.sh bootstrap --pubkey <ci_key.pub> [--dry-run]
 #       One-time (and re-runnable) VM setup, run by the OWNER from a laptop through `gcloud compute ssh` as
-#       themselves: users loandeploy/loanpoc, /opt/loan-poc, the root-owned activation script and SSH gate, a
+#       themselves: users loandeploy/loanbuild/loanpoc, /opt/loan-poc, the root-owned activation script and SSH gate, a
 #       sudoers drop-in for that one script, systemd units, the nginx site, the CI key. Prints the host key line.
 #       Re-run it to change units/nginx/scripts or to rotate the CI key.
 #   scripts/deploy.sh api [--dry-run] [--skip-build]
@@ -76,6 +76,7 @@ put() { local tmp; tmp="$(mktemp)"; printf '%s' "$4" | base64 -d > "$tmp"; insta
 
 echo "--> users"
 id -u loanpoc >/dev/null 2>&1 || useradd --system --home-dir "$APP" --no-create-home --shell /usr/sbin/nologin loanpoc
+id -u loanbuild >/dev/null 2>&1 || useradd --system --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin loanbuild
 id -u loandeploy >/dev/null 2>&1 || useradd --system --create-home --home-dir /var/lib/loandeploy --shell /bin/bash loandeploy
 passwd -l loandeploy >/dev/null 2>&1 || true
 
@@ -83,7 +84,9 @@ echo "--> directories"
 install -d -o root -g root -m 755 "$APP" "$APP/releases"
 install -d -o loandeploy -g loandeploy -m 750 "$APP/incoming"
 install -d -o loanpoc -g loanpoc -m 750 "$APP/data" "$APP/data/events"
-install -d -o loanpoc -g loanpoc -m 700 "$APP/.npm"
+install -d -o loanbuild -g loanbuild -m 700 "$APP/.npm"
+install -d -o root -g root -m 755 /var/lib/loan-poc
+[ -f /var/lib/loan-poc/deploy.lock ] || install -o root -g root -m 644 /dev/null /var/lib/loan-poc/deploy.lock
 if [ -f "$APP/.env" ]; then chown root:loanpoc "$APP/.env"; chmod 640 "$APP/.env"
 else echo "    WARNING: $APP/.env is missing; copy it before the first deploy (deploy/SETUP.md)"; fi
 

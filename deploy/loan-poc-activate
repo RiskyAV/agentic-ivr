@@ -1,11 +1,23 @@
 #!/bin/bash
 # /usr/local/sbin/loan-poc-activate <release-id>   (root-owned; installed by `scripts/deploy.sh bootstrap`)
 #
-# The ONLY command the deploy user may run with sudo. It activates a release tarball that was uploaded to
-# /opt/loan-poc/incoming/<id>.tgz (+ <id>.sha256): verify -> unpack -> npm ci as the runtime user (no install
-# scripts) -> atomic `current` swap -> restart -> local health check -> roll back on failure -> prune.
-# It never installs systemd units or nginx config from the tarball: those change only through bootstrap
-# (run by the owner), so a deploy can at most run new app code as the unprivileged runtime user.
+# The ONLY command the deploy user may run with sudo. It activates a release tarball uploaded (by the SSH gate) to
+# /opt/loan-poc/incoming/<id>.tgz + <id>.sha256.
+#
+# Privilege boundaries (why it is built this way):
+#  - Inputs are read AS loandeploy (`runuser -u loandeploy -- cat`) into a root-only staging dir (/run/loan-poc, 700)
+#    once, under the deploy lock; every check and the extraction use only that private copy. A file swapped or
+#    symlinked in incoming/ after that point changes nothing, and root never opens a path loandeploy controls.
+#  - The archive listing must contain only regular files and directories with relative paths (no symlinks,
+#    hardlinks, devices, fifos, absolute paths or "..").
+#  - Extraction and `npm ci --ignore-scripts` run as the dedicated build user `loanbuild` (not root, so no mknod or
+#    setuid-root; not the runtime user `loanpoc`, so the live app cannot reach the tree while it is being built)
+#    inside a loanbuild-owned 700 dir under the root-owned 711 parent releases/.build. Root then locks the top dir
+#    (root:root 700) before chown -R -h / chmod -R (which never follow symlinks), and moves it into releases/<id>.
+#  - It never installs systemd units, nginx config or sudoers from the tarball (those change only via bootstrap),
+#    so a deploy can at most run new application code as `loanpoc`.
+# Flow: stage -> verify -> build -> atomic `current` swap -> restart -> health check -> roll back (or, on a first
+# deploy, stop and remove) on failure -> prune.
 set -euo pipefail
 umask 022
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -13,8 +25,13 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 APP=/opt/loan-poc
 IN="$APP/incoming"
 REL="$APP/releases"
-RUN_USER=loanpoc
+BUILD_PARENT="$REL/.build"
+STAGE=/run/loan-poc
+LOCK=/var/lib/loan-poc/deploy.lock
+BUILD_USER=loanbuild
+UPLOAD_USER=loandeploy
 MAX_BYTES=$((50 * 1024 * 1024))
+NPM_CACHE_MAX_MB=500
 KEEP=5
 
 die() { echo "activate: $*" >&2; exit 1; }
@@ -23,42 +40,63 @@ die() { echo "activate: $*" >&2; exit 1; }
 ID="$1"
 [[ "$ID" =~ ^[0-9]{8}T[0-9]{6}-[0-9a-f]{7,40}$ ]] || die "invalid release id"
 
-exec 9>/run/loan-poc-activate.lock
-flock -n 9 || die "another activation is running"
+install -d -o root -g root -m 755 "$(dirname "$LOCK")"
+[ -f "$LOCK" ] || install -o root -g root -m 644 /dev/null "$LOCK"
+exec 9<"$LOCK"
+flock -n 9 || die "another deploy step is running"
 
-TGZ="$IN/$ID.tgz"
-SUM="$IN/$ID.sha256"
-cleanup_incoming() { rm -f -- "$TGZ" "$SUM"; }
+install -d -o root -g root -m 700 "$STAGE"
+STGZ="$STAGE/$ID.tgz"
+SSUM="$STAGE/$ID.sha256"
+T=""
+cleanup() { rm -f -- "$STGZ" "$SSUM"; if [ -n "$T" ] && [ -d "$T" ]; then rm -rf -- "$T"; fi; }
+trap cleanup EXIT
 
-echo "--> verify $ID"
-[ -f "$TGZ" ] && [ ! -L "$TGZ" ] || die "missing $TGZ"
-[ -f "$SUM" ] && [ ! -L "$SUM" ] || die "missing $SUM"
-size=$(stat -c %s "$TGZ")
-[ "$size" -gt 0 ] && [ "$size" -le "$MAX_BYTES" ] || { cleanup_incoming; die "tarball size $size out of range"; }
-grep -Eqx "[0-9a-f]{64}  $ID\.tgz" "$SUM" || { cleanup_incoming; die "malformed checksum file"; }
-(cd "$IN" && sha256sum --check --status --strict "$ID.sha256") || { cleanup_incoming; die "checksum mismatch"; }
-# Only regular files and directories, relative paths, no "..".
-if tar -tvzf "$TGZ" | awk '{print substr($1,1,1)}' | grep -qv '^[-d]$'; then cleanup_incoming; die "tarball has links or special files"; fi
-if tar -tzf "$TGZ" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then cleanup_incoming; die "tarball has unsafe paths"; fi
+echo "--> stage $ID (read as $UPLOAD_USER, root-only copy)"
+runuser -u "$UPLOAD_USER" -- head -c $((MAX_BYTES + 1)) -- "$IN/$ID.tgz" > "$STGZ" 9<&- || die "cannot read upload $ID.tgz"
+runuser -u "$UPLOAD_USER" -- head -c 200 -- "$IN/$ID.sha256" > "$SSUM" 9<&- || die "cannot read $ID.sha256"
+# The upload is consumed: remove it now (rm never follows a symlink).
+rm -f -- "$IN/$ID.tgz" "$IN/$ID.sha256"
+
+echo "--> verify"
+size=$(stat -c %s "$STGZ")
+[ "$size" -gt 0 ] && [ "$size" -le "$MAX_BYTES" ] || die "tarball size $size out of range"
+grep -Eqx "[0-9a-f]{64}  $ID\.tgz" "$SSUM" || die "malformed checksum file"
+[ "$(sha256sum "$STGZ" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$SSUM")" ] || die "checksum mismatch"
+listing="$(tar -tvzf "$STGZ")" || die "not a readable tar.gz"
+if printf '%s\n' "$listing" | awk '{print substr($1,1,1)}' | grep -qv '^[-d]$'; then
+  die "archive has links, devices, fifos or other special entries"
+fi
+names="$(tar -tzf "$STGZ")"
+if printf '%s\n' "$names" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then die "archive has unsafe paths"; fi
 
 R="$REL/$ID"
-[ ! -e "$R" ] || { cleanup_incoming; die "release $ID already exists"; }
-PREV="$(readlink -f "$APP/current" 2>/dev/null || true)"
+[ ! -e "$R" ] || die "release $ID already exists"
+PREV=""
+if [ -L "$APP/current" ]; then PREV="$(readlink -e "$APP/current" 2>/dev/null || true)"; fi
+case "$PREV" in "$REL"/*) ;; *) PREV="" ;; esac
 
-echo "--> unpack and install production dependencies (as $RUN_USER, --ignore-scripts)"
-install -d -o "$RUN_USER" -g "$RUN_USER" -m 755 "$R"
-tar -xzf "$TGZ" -C "$R" --no-same-owner --no-same-permissions
-chown -R "$RUN_USER:$RUN_USER" "$R"
-install -d -o "$RUN_USER" -g "$RUN_USER" -m 700 "$APP/.npm"
-if ! (cd "$R" && runuser -u "$RUN_USER" -- env HOME="$APP" npm_config_cache="$APP/.npm" \
-      npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
-      --workspace @app/server --workspace @app/mock-systems --include-workspace-root); then
-  rm -rf -- "$R"; cleanup_incoming; die "npm ci failed; nothing changed"
+echo "--> build as $BUILD_USER (extract, npm ci --omit=dev --ignore-scripts)"
+install -d -o root -g root -m 711 "$BUILD_PARENT"
+T="$BUILD_PARENT/$ID"
+rm -rf -- "$T"
+install -d -o "$BUILD_USER" -g "$BUILD_USER" -m 700 "$T"
+install -d -o "$BUILD_USER" -g "$BUILD_USER" -m 700 "$APP/.npm"
+runuser -u "$BUILD_USER" -- tar --no-same-owner --no-same-permissions -xzf - -C "$T" < "$STGZ" 9<&-
+(cd "$T" && runuser -u "$BUILD_USER" -- env HOME="$APP/.npm" npm_config_cache="$APP/.npm" \
+   npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+   --workspace @app/server --workspace @app/mock-systems --include-workspace-root 9<&-) || die "npm ci failed; nothing changed"
+if [ "$(du -sm "$APP/.npm" | cut -f1)" -gt "$NPM_CACHE_MAX_MB" ]; then
+  runuser -u "$BUILD_USER" -- env HOME="$APP/.npm" npm_config_cache="$APP/.npm" npm cache clean --force 9<&- || true
 fi
-# Code is read-only to the runtime user from here on.
-chown -R root:root "$R"
-chmod -R u+rwX,go+rX,go-w "$R"
-cleanup_incoming
+
+echo "--> lock down and move into place"
+chown root:root "$T"; chmod 700 "$T"           # loanbuild can no longer enter the tree
+chown -R -h root:root "$T"                      # -h: change links themselves, never their targets
+chmod -R u+rwX,go+rX,go-w "$T"                  # chmod -R skips symlinks
+chmod 755 "$T"
+mv -T -- "$T" "$R"
+T=""
 
 healthy() {
   for _ in $(seq 1 30); do
@@ -74,24 +112,28 @@ swap_to() { ln -sfn "$1" "$APP/current.new" && mv -T "$APP/current.new" "$APP/cu
 
 echo "--> activate"
 swap_to "$R"
-systemctl restart loan-mocks loan-api 9>&-
+systemctl restart loan-mocks loan-api 9<&-
 if healthy; then
   echo "    healthy: $ID is live"
 else
   echo "activate: $ID failed its health check" >&2
   journalctl -u loan-api -n 30 --no-pager >&2 || true
-  if [ -n "$PREV" ] && [ -d "$PREV" ]; then
+  if [ -n "$PREV" ] && [ -d "$PREV" ] && [ "$PREV" != "$R" ]; then
     echo "--> rolling back to $(basename "$PREV")" >&2
     swap_to "$PREV"
-    systemctl restart loan-mocks loan-api 9>&-
+    systemctl restart loan-mocks loan-api 9<&-
     if healthy; then echo "    rollback healthy" >&2; else echo "activate: rollback is not healthy either" >&2; fi
-    rm -rf -- "$R"
+  else
+    echo "--> first deploy failed: stopping the units and removing the release" >&2
+    systemctl stop loan-api loan-mocks 9<&- || true
+    rm -f -- "$APP/current"
   fi
+  rm -rf -- "$R"
   exit 1
 fi
 
 echo "--> prune (keep $KEEP)"
-find "$REL" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | tail -n +$((KEEP + 1)) | cut -d' ' -f2- |
+find "$REL" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %p\n' | sort -rn | tail -n +$((KEEP + 1)) | cut -d' ' -f2- |
   while read -r old; do
     [ "$old" = "$R" ] || [ "$old" = "$PREV" ] || rm -rf -- "$old"
   done

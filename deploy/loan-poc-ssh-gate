@@ -6,14 +6,22 @@
 #   upload <id> <sha256>   stdin -> /opt/loan-poc/incoming/<id>.tgz (max 50 MB) and <id>.sha256
 #   activate <id>          sudo /usr/local/sbin/loan-poc-activate <id>
 # No shell, no scp/sftp, no forwarding, no pty.
+# Uploads take the same deploy lock as activation (so they never overlap), refuse an id that already exists, and are
+# capped at 3 pending uploads / 200 MB in incoming/; stale partial uploads (> 1 h) are removed on every call.
 set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 IN=/opt/loan-poc/incoming
+REL=/opt/loan-poc/releases
+LOCK=/var/lib/loan-poc/deploy.lock
 MAX_BYTES=$((50 * 1024 * 1024))
+MAX_PENDING=3
+MAX_TOTAL=$((200 * 1024 * 1024))
 ID_RE='^[0-9]{8}T[0-9]{6}-[0-9a-f]{7,40}$'
 
 deny() { echo "denied: $*" >&2; exit 1; }
+
+find "$IN" -maxdepth 1 -type f -name '.upload.*.part' -mmin +60 -delete 2>/dev/null || true
 
 read -r -a args <<< "${SSH_ORIGINAL_COMMAND:-}"
 case "${args[0]:-}" in
@@ -22,8 +30,16 @@ case "${args[0]:-}" in
     id="${args[1]}"; sum="${args[2]}"
     [[ "$id" =~ $ID_RE ]] || deny "invalid release id"
     [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || deny "invalid sha256"
+    [ -f "$LOCK" ] || deny "deploy lock missing (run bootstrap)"
+    exec 9<"$LOCK"
+    flock -w 600 9 || deny "timed out waiting for the deploy lock"
+    [ ! -e "$IN/$id.tgz" ] && [ ! -e "$IN/$id.sha256" ] && [ ! -e "$REL/$id" ] || deny "release id $id already exists"
+    pending=$(find "$IN" -maxdepth 1 -type f -name '*.tgz' | wc -l)
+    [ "$pending" -lt "$MAX_PENDING" ] || deny "$pending uploads already pending (max $MAX_PENDING)"
+    used=$(du -sb "$IN" | cut -f1)
+    [ $((used + MAX_BYTES)) -le "$MAX_TOTAL" ] || deny "incoming/ is too full ($used bytes)"
     umask 027
-    tmp="$(mktemp "$IN/.upload.XXXXXX")"
+    tmp="$(mktemp "$IN/.upload.XXXXXX.part")"
     trap 'rm -f -- "$tmp"' EXIT
     head -c $((MAX_BYTES + 1)) > "$tmp"
     [ "$(stat -c %s "$tmp")" -le "$MAX_BYTES" ] || deny "upload larger than $MAX_BYTES bytes"

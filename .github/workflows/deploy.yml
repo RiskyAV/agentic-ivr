@@ -49,7 +49,9 @@ jobs:
           umask 077
           echo "DEPLOY_KEY_FILE=$RUNNER_TEMP/loan-poc-deploy-key" >> "$GITHUB_ENV"
           echo "DEPLOY_KNOWN_HOSTS_FILE=$RUNNER_TEMP/loan-poc-known-hosts" >> "$GITHUB_ENV"
-          test -n "$DEPLOY_HOST" && test -n "$DEPLOY_SSH_KEY" && test -n "$DEPLOY_KNOWN_HOSTS"
+          [ -n "$DEPLOY_HOST" ] || { echo "::error::missing variable DEPLOY_HOST"; exit 1; }
+          [ -n "$DEPLOY_SSH_KEY" ] || { echo "::error::missing secret DEPLOY_SSH_KEY"; exit 1; }
+          [ -n "$DEPLOY_KNOWN_HOSTS" ] || { echo "::error::missing secret DEPLOY_KNOWN_HOSTS"; exit 1; }
           printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/loan-poc-deploy-key"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/loan-poc-known-hosts"
       - name: Deploy API (type-check, git archive, upload, activate with health check and rollback)

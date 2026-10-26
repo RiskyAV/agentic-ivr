@@ -19,7 +19,7 @@ Fixed names used below:
 | GCP project / zone / VM | `GCP_PROJECT` / `VM_ZONE` / `VM_NAME` (metadata SSH keys, port 22 open, Node 22 at `/usr/bin/node`, certbot installed) |
 | API domain | `api.sparsan.com` → nginx on the VM → `127.0.0.1:4000` |
 | Pages project | `loan-poc` (production branch `main`) |
-| VM users | `loandeploy` (CI uploads and activation only), `loanpoc` (runs the app, no login shell) |
+| VM users | `loandeploy` (CI uploads and activation only), `loanbuild` (builds releases), `loanpoc` (runs the app); only `loandeploy` has a shell, and it is reachable only through the forced command |
 | VM paths | `/opt/loan-poc/{incoming,releases,current,data,.env}` |
 
 The VM already serves another site, `cohost`, which holds `default_server` on 80/443 and uses port 3000. Nothing here or in `deploy.sh` edits that site, changes the default server or uses that port. Our block matches only `server_name api.sparsan.com`. Our files are:
@@ -169,8 +169,11 @@ scripts/deploy.sh bootstrap --pubkey ~/.ssh/loan-poc-deploy.pub
 
 It runs over `gcloud compute ssh` with your own account and `sudo`, and it is idempotent. It:
 
-1. creates `loanpoc` (runtime, no login shell) and `loandeploy` (password locked, shell `/bin/bash`, home `/var/lib/loandeploy`);
-2. creates `/opt/loan-poc/{releases,incoming,data}`; only `incoming/` belongs to `loandeploy`;
+1. creates three users:
+   - `loanpoc` (runtime, no login shell);
+   - `loanbuild` (extracts and installs releases, no login shell);
+   - `loandeploy` (password locked, shell `/bin/bash`, home `/var/lib/loandeploy`);
+2. creates `/opt/loan-poc/{releases,incoming,data}` (only `incoming/` belongs to `loandeploy`) and the deploy lock `/var/lib/loan-poc/deploy.lock`;
 3. checks Node 22 at `/usr/bin/node`, and checks that ports 4000/4100 are free or already ours;
 4. installs the root-owned `/usr/local/sbin/loan-poc-activate` and `/usr/local/sbin/loan-poc-ssh-gate` (sources in `deploy/`);
 5. writes `/etc/sudoers.d/loan-poc-deploy`, validated with `visudo -cf`: `loandeploy` may run **only** `loan-poc-activate`, with NOPASSWD;
@@ -178,20 +181,27 @@ It runs over `gcloud compute ssh` with your own account and `sudo`, and it is id
 7. installs the systemd units and the nginx site. It runs `nginx -t` before reloading and restores the old file on failure. A certbot-managed file is left alone;
 8. prints the line to pin as `DEPLOY_KNOWN_HOSTS`, for example `203.0.113.10 ssh-ed25519 AAAA…`. Check it against `gcloud compute ssh $VM … --command 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub'`.
 
+The npm cache (`/opt/loan-poc/.npm`, owned by `loanbuild`) is cleaned automatically when it grows past 500 MB. To clean it by hand, run `sudo runuser -u loanbuild -- env HOME=/opt/loan-poc/.npm npm_config_cache=/opt/loan-poc/.npm npm cache clean --force`.
+
 Re-run bootstrap whenever `deploy/*.service`, `deploy/nginx-api.conf` or the two scripts change. **A normal deploy never changes them.**
 
 ### What the deploy key can do (blast radius)
 
 - `restrict` turns off port, agent and X11 forwarding, PTY allocation and `~/.ssh/rc`.
 - The forced command `loan-poc-ssh-gate` ignores what the client asks for and accepts exactly two requests:
-  - `upload <id> <sha256>`: stdin is written to `/opt/loan-poc/incoming/<id>.tgz` (max 50 MB);
+  - `upload <id> <sha256>`: stdin is written to `/opt/loan-poc/incoming/<id>.tgz`. Each upload is capped at 50 MB, with at most 3 pending uploads and 200 MB in total. An id that already exists is refused, the deploy lock is taken, and stale partial uploads are removed after 1 hour;
   - `activate <id>`: runs `sudo /usr/local/sbin/loan-poc-activate <id>`.
 
   There is no shell, and no scp or sftp. The scripts upload by streaming over SSH instead of scp, because a forced command and scp do not mix safely.
-- The activation script takes one argument matching `^[0-9]{8}T[0-9]{6}-[0-9a-f]{7,40}$` and checks the tarball's checksum and size. It accepts only regular files and directories, with no absolute paths and no `..`. It installs dependencies with `--ignore-scripts` as `loanpoc`, and leaves the code root-owned and read-only.
+- The activation script takes one argument matching `^[0-9]{8}T[0-9]{6}-[0-9a-f]{7,40}$`. Under the deploy lock it reads the upload **as `loandeploy`** into a root-only staging directory, so a swapped or symlinked upload cannot trick root. It then removes the upload and checks only that private copy:
+  - checksum and size;
+  - regular files and directories only (no symlinks, hardlinks, devices or fifos);
+  - no absolute paths and no `..`.
+
+  It extracts and runs `npm ci --omit=dev --ignore-scripts` **as `loanbuild`**, inside a directory that neither `loanpoc` (the live app) nor `loandeploy` can reach. That rules out device nodes, setuid-root files and symlink races. It then locks the tree down to root-owned and read-only before moving it into place. If a first deploy fails, it stops the units and removes the release. A later failure rolls back to the previous release.
 - It never installs units, nginx config or sudoers from the tarball.
 
-So a leaked key lets an attacker deploy arbitrary **application code that runs as `loanpoc`**. That code can read `/opt/loan-poc/.env` (the app's API keys) and serve traffic on `api.sparsan.com`. It cannot get a shell as `loandeploy`, run other root commands, touch the `cohost` site, change nginx/systemd/sudoers, or read other users' files beyond what `loanpoc` can. If the key leaks, rotate it (below), then rotate the keys in `.env`.
+So a leaked key lets an attacker deploy arbitrary **application code that runs as `loanpoc`**. This includes a `.npmrc` in the tarball, which can change how `npm ci` runs as `loanbuild` (registry, cache); that is within the same radius. That code can read `/opt/loan-poc/.env` (the app's API keys) and serve traffic on `api.sparsan.com`. It cannot get a shell as `loandeploy`, run other root commands, touch the `cohost` site, change nginx/systemd/sudoers, or read other users' files beyond what `loanpoc` can. If the key leaks, rotate it (below), then rotate the keys in `.env`.
 
 ### Rotating the deploy key
 
