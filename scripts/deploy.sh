@@ -71,6 +71,7 @@ bootstrap_script() {
   cat <<'HEAD'
 set -euo pipefail
 umask 022
+export LC_ALL=C
 APP=/opt/loan-poc
 put() { local tmp; tmp="$(mktemp)"; printf '%s' "$4" | base64 -d > "$tmp"; install -m "$2" -o "${3%%:*}" -g "${3##*:}" "$tmp" "$1"; rm -f "$tmp"; }
 
@@ -84,11 +85,17 @@ echo "--> directories"
 install -d -o root -g root -m 755 "$APP" "$APP/releases"
 install -d -o loandeploy -g loandeploy -m 750 "$APP/incoming"
 install -d -o loanpoc -g loanpoc -m 750 "$APP/data" "$APP/data/events"
-install -d -o loanbuild -g loanbuild -m 700 "$APP/.npm"
+rm -rf "$APP/.npm"   # no shared npm cache: each build gets its own, discarded afterwards
 install -d -o root -g root -m 755 /var/lib/loan-poc
-[ -f /var/lib/loan-poc/deploy.lock ] || install -o root -g root -m 644 /dev/null /var/lib/loan-poc/deploy.lock
+[ -f /var/lib/loan-poc/deploy.lock ] || install -o root -g loandeploy -m 640 /dev/null /var/lib/loan-poc/deploy.lock
+chown root:loandeploy /var/lib/loan-poc/deploy.lock; chmod 640 /var/lib/loan-poc/deploy.lock
 if [ -f "$APP/.env" ]; then chown root:loanpoc "$APP/.env"; chmod 640 "$APP/.env"
 else echo "    WARNING: $APP/.env is missing; copy it before the first deploy (deploy/SETUP.md)"; fi
+
+echo "--> kernel link protections and systemd-run"
+[ "$(sysctl -n fs.protected_hardlinks)" = 1 ] || { echo "fs.protected_hardlinks must be 1 (sysctl -w fs.protected_hardlinks=1)" >&2; exit 1; }
+[ "$(sysctl -n fs.protected_symlinks)" = 1 ] || { echo "fs.protected_symlinks must be 1 (sysctl -w fs.protected_symlinks=1)" >&2; exit 1; }
+command -v systemd-run >/dev/null || { echo "systemd-run is required (sandboxed builds)" >&2; exit 1; }
 
 echo "--> node and ports"
 [ -x /usr/bin/node ] || { echo "/usr/bin/node not found (units expect it)" >&2; exit 1; }
@@ -218,7 +225,7 @@ deploy_api() {
     ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "upload ${id} ${sum}" < "$tarball"
   fi
 
-  log "activate (verify, npm ci as loanpoc, swap, restart, health check, rollback on failure)"
+  log "activate (verify, sandboxed npm ci as loanbuild, swap, restart, health check, rollback on failure)"
   run ssh "${SSH_OPTS[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "activate ${id}"
   run rm -f "$tarball"
   log "api deployed: release ${id}"

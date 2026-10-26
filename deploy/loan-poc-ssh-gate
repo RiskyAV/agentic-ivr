@@ -7,8 +7,10 @@
 #   activate <id>          sudo /usr/local/sbin/loan-poc-activate <id>
 # No shell, no scp/sftp, no forwarding, no pty.
 # Uploads take the same deploy lock as activation (so they never overlap), refuse an id that already exists, and are
-# capped at 3 pending uploads / 200 MB in incoming/; stale partial uploads (> 1 h) are removed on every call.
+# capped at 3 pending uploads / 200 MB in incoming/; partial and unactivated uploads older than 1 h are removed on
+# every call.
 set -euo pipefail
+export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 IN=/opt/loan-poc/incoming
@@ -21,7 +23,8 @@ ID_RE='^[0-9]{8}T[0-9]{6}-[0-9a-f]{7,40}$'
 
 deny() { echo "denied: $*" >&2; exit 1; }
 
-find "$IN" -maxdepth 1 -type f -name '.upload.*.part' -mmin +60 -delete 2>/dev/null || true
+# Stale partial uploads and uploads never activated (e.g. a failed run) older than 1 hour are removed.
+find "$IN" -maxdepth 1 ! -type d \( -name '.upload.*.part' -o -name '*.tgz' -o -name '*.sha256' \) -mmin +60 -delete 2>/dev/null || true
 
 read -r -a args <<< "${SSH_ORIGINAL_COMMAND:-}"
 case "${args[0]:-}" in

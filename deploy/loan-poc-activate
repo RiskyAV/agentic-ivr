@@ -5,22 +5,30 @@
 # /opt/loan-poc/incoming/<id>.tgz + <id>.sha256.
 #
 # Privilege boundaries (why it is built this way):
-#  - Inputs are read AS loandeploy (`runuser -u loandeploy -- cat`) into a root-only staging dir (/run/loan-poc, 700)
-#    once, under the deploy lock; every check and the extraction use only that private copy. A file swapped or
-#    symlinked in incoming/ after that point changes nothing, and root never opens a path loandeploy controls.
-#  - The archive listing must contain only regular files and directories with relative paths (no symlinks,
-#    hardlinks, devices, fifos, absolute paths or "..").
-#  - Extraction and `npm ci --ignore-scripts` run as the dedicated build user `loanbuild` (not root, so no mknod or
-#    setuid-root; not the runtime user `loanpoc`, so the live app cannot reach the tree while it is being built)
-#    inside a loanbuild-owned 700 dir under the root-owned 711 parent releases/.build. Root then locks the top dir
-#    (root:root 700) before chown -R -h / chmod -R (which never follow symlinks), and moves it into releases/<id>.
+#  - Inputs are read AS loandeploy (`runuser -u loandeploy -- head`) into a root-only staging dir (/run/loan-poc,
+#    700) once, under the deploy lock; every check and the extraction use only that private copy, and the upload is
+#    deleted on every exit path. Root never opens a path loandeploy controls.
+#  - The listing must contain only regular files and directories with relative paths (no symlinks, hardlinks,
+#    devices, fifos, absolute paths, "..") and no .npmrc / .yarnrc* anywhere.
+#  - Extraction and `npm ci --omit=dev --ignore-scripts --git=/bin/false` (user/global npm config = empty root-owned files) run as
+#    the dedicated build user `loanbuild` in a transient systemd unit (`systemd-run --wait`): own cgroup killed at
+#    the end (KillMode=control-group), ProtectSystem=strict with the build dir as the only writable path,
+#    PrivateTmp, PrivateDevices, NoNewPrivileges, RestrictSUIDSGID, memory and runtime caps. Afterwards every
+#    loanbuild process is killed and the script aborts if any survives, so build-time code cannot persist.
+#  - The build dir (loanbuild 700, holding the tree and a per-build npm cache that is discarded) lives under the
+#    root-owned 711 releases/.build, unreachable by the live app (loanpoc) and by loandeploy. After the kill, root
+#    locks the top dir (root:root 700), aborts if any regular file has more than one link (planted hardlink), then
+#    runs `chown -R -P -h` (no link is followed; links themselves are changed) and `chmod -R` (GNU chmod skips
+#    symlinks met during recursion) before moving the tree into releases/<id>.
 #  - It never installs systemd units, nginx config or sudoers from the tarball (those change only via bootstrap),
 #    so a deploy can at most run new application code as `loanpoc`.
-# Flow: stage -> verify -> build -> atomic `current` swap -> restart -> health check -> roll back (or, on a first
-# deploy, stop and remove) on failure -> prune.
+# Flow: stage -> verify -> sandboxed build -> lock down -> atomic `current` swap -> restart -> health check ->
+# roll back (or, on a first deploy, stop and remove) on failure -> prune.
 set -euo pipefail
 umask 022
+export LC_ALL=C
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+cd /
 
 APP=/opt/loan-poc
 IN="$APP/incoming"
@@ -31,7 +39,6 @@ LOCK=/var/lib/loan-poc/deploy.lock
 BUILD_USER=loanbuild
 UPLOAD_USER=loandeploy
 MAX_BYTES=$((50 * 1024 * 1024))
-NPM_CACHE_MAX_MB=500
 KEEP=5
 
 die() { echo "activate: $*" >&2; exit 1; }
@@ -39,9 +46,10 @@ die() { echo "activate: $*" >&2; exit 1; }
 [ "$#" -eq 1 ] || die "usage: loan-poc-activate <YYYYMMDDTHHMMSS-gitsha>"
 ID="$1"
 [[ "$ID" =~ ^[0-9]{8}T[0-9]{6}-[0-9a-f]{7,40}$ ]] || die "invalid release id"
+command -v systemd-run >/dev/null || die "systemd-run is required"
 
 install -d -o root -g root -m 755 "$(dirname "$LOCK")"
-[ -f "$LOCK" ] || install -o root -g root -m 644 /dev/null "$LOCK"
+[ -f "$LOCK" ] || install -o root -g "$UPLOAD_USER" -m 640 /dev/null "$LOCK"
 exec 9<"$LOCK"
 flock -n 9 || die "another deploy step is running"
 
@@ -49,13 +57,15 @@ install -d -o root -g root -m 700 "$STAGE"
 STGZ="$STAGE/$ID.tgz"
 SSUM="$STAGE/$ID.sha256"
 T=""
-cleanup() { rm -f -- "$STGZ" "$SSUM"; if [ -n "$T" ] && [ -d "$T" ]; then rm -rf -- "$T"; fi; }
+cleanup() {
+  rm -f -- "$STGZ" "$SSUM" "$IN/$ID.tgz" "$IN/$ID.sha256"   # rm never follows a symlink
+  if [ -n "$T" ] && [ -d "$T" ]; then rm -rf -- "$T"; fi
+}
 trap cleanup EXIT
 
 echo "--> stage $ID (read as $UPLOAD_USER, root-only copy)"
 runuser -u "$UPLOAD_USER" -- head -c $((MAX_BYTES + 1)) -- "$IN/$ID.tgz" > "$STGZ" 9<&- || die "cannot read upload $ID.tgz"
 runuser -u "$UPLOAD_USER" -- head -c 200 -- "$IN/$ID.sha256" > "$SSUM" 9<&- || die "cannot read $ID.sha256"
-# The upload is consumed: remove it now (rm never follows a symlink).
 rm -f -- "$IN/$ID.tgz" "$IN/$ID.sha256"
 
 echo "--> verify"
@@ -69,6 +79,7 @@ if printf '%s\n' "$listing" | awk '{print substr($1,1,1)}' | grep -qv '^[-d]$'; 
 fi
 names="$(tar -tzf "$STGZ")"
 if printf '%s\n' "$names" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then die "archive has unsafe paths"; fi
+if printf '%s\n' "$names" | grep -Eq '(^|/)\.(npmrc|yarnrc[^/]*)/?$'; then die "archive contains .npmrc/.yarnrc"; fi
 
 R="$REL/$ID"
 [ ! -e "$R" ] || die "release $ID already exists"
@@ -76,26 +87,42 @@ PREV=""
 if [ -L "$APP/current" ]; then PREV="$(readlink -e "$APP/current" 2>/dev/null || true)"; fi
 case "$PREV" in "$REL"/*) ;; *) PREV="" ;; esac
 
-echo "--> build as $BUILD_USER (extract, npm ci --omit=dev --ignore-scripts)"
+echo "--> sandboxed build as $BUILD_USER (systemd-run: extract, npm ci --omit=dev --ignore-scripts)"
 install -d -o root -g root -m 711 "$BUILD_PARENT"
 T="$BUILD_PARENT/$ID"
 rm -rf -- "$T"
-install -d -o "$BUILD_USER" -g "$BUILD_USER" -m 700 "$T"
-install -d -o "$BUILD_USER" -g "$BUILD_USER" -m 700 "$APP/.npm"
-runuser -u "$BUILD_USER" -- tar --no-same-owner --no-same-permissions -xzf - -C "$T" < "$STGZ" 9<&-
-(cd "$T" && runuser -u "$BUILD_USER" -- env HOME="$APP/.npm" npm_config_cache="$APP/.npm" \
-   npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
-   --workspace @app/server --workspace @app/mock-systems --include-workspace-root 9<&-) || die "npm ci failed; nothing changed"
-if [ "$(du -sm "$APP/.npm" | cut -f1)" -gt "$NPM_CACHE_MAX_MB" ]; then
-  runuser -u "$BUILD_USER" -- env HOME="$APP/.npm" npm_config_cache="$APP/.npm" npm cache clean --force 9<&- || true
-fi
+install -d -o "$BUILD_USER" -g "$BUILD_USER" -m 700 "$T" "$T/app" "$T/npm-cache"
+# Empty, root-owned npm user/global config (npm refuses the same file for both, so two files).
+NPMRC_DIR=/run/loan-poc-npmrc
+install -d -o root -g root -m 755 "$NPMRC_DIR"
+install -o root -g root -m 444 /dev/null "$NPMRC_DIR/user"
+install -o root -g root -m 444 /dev/null "$NPMRC_DIR/global"
+# shellcheck disable=SC2016  # the script below is expanded by the sandboxed bash, not here
+systemd-run --wait --pipe --collect --quiet --unit "loan-poc-build-$ID" \
+  -p User="$BUILD_USER" -p Group="$BUILD_USER" -p WorkingDirectory="$T" \
+  -p KillMode=control-group -p ProtectSystem=strict -p ProtectHome=yes -p PrivateTmp=yes -p PrivateDevices=yes \
+  -p NoNewPrivileges=yes -p RestrictSUIDSGID=yes -p ReadWritePaths="$T" \
+  -p MemoryMax=1G -p RuntimeMaxSec=600 \
+  -E LC_ALL=C -E HOME="$T" -E npm_config_cache="$T/npm-cache" \
+  -E npm_config_userconfig="$NPMRC_DIR/user" -E npm_config_globalconfig="$NPMRC_DIR/global" -E npm_config_update_notifier=false \
+  /bin/bash -c 'set -euo pipefail
+    tar --no-same-owner --no-same-permissions -xzf - -C app
+    cd app
+    npm ci --omit=dev --ignore-scripts --git=/bin/false --no-audit --no-fund \
+      --workspace @app/server --workspace @app/mock-systems --include-workspace-root' \
+  < "$STGZ" 9<&- || die "sandboxed build failed; nothing changed"
 
-echo "--> lock down and move into place"
-chown root:root "$T"; chmod 700 "$T"           # loanbuild can no longer enter the tree
-chown -R -h root:root "$T"                      # -h: change links themselves, never their targets
-chmod -R u+rwX,go+rX,go-w "$T"                  # chmod -R skips symlinks
-chmod 755 "$T"
-mv -T -- "$T" "$R"
+echo "--> stop every $BUILD_USER process, then lock down"
+pkill -KILL -u "$BUILD_USER" 9<&- || true
+sleep 0.2
+if pgrep -u "$BUILD_USER" >/dev/null; then die "$BUILD_USER processes survived the build; aborting"; fi
+chown root:root "$T"; chmod 700 "$T"           # nothing below is reachable by non-root from here on
+if [ -n "$(find "$T/app" -type f -links +1 -print -quit)" ]; then die "build produced hardlinked files; aborting"; fi
+chown -R -P -h root:root "$T/app"               # -P: never traverse links; -h: change links, not their targets
+chmod -R u+rwX,go+rX,go-w "$T/app"              # GNU chmod -R does not follow symlinks met during recursion
+chmod 755 "$T/app"
+mv -T -- "$T/app" "$R"
+rm -rf -- "$T"
 T=""
 
 healthy() {
