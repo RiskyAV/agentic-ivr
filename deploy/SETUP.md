@@ -179,12 +179,12 @@ It runs over `gcloud compute ssh` with your own account and `sudo`, and it is id
 4. installs the root-owned `/usr/local/sbin/loan-poc-activate` and `/usr/local/sbin/loan-poc-ssh-gate` (sources in `deploy/`);
 5. writes `/etc/sudoers.d/loan-poc-deploy`, validated with `visudo -cf`: `loandeploy` may run **only** `loan-poc-activate`, with NOPASSWD;
 6. writes the CI public key to `/var/lib/loandeploy/.ssh/authorized_keys` as `restrict,command="/usr/local/sbin/loan-poc-ssh-gate" ssh-ed25519 …`. The file and its directory are root-owned;
-7. installs the systemd units and the nginx site. It runs `nginx -t` before reloading and restores the old file on failure. A certbot-managed file is left alone;
+7. installs the systemd units and the nginx site. It installs `deploy/nginx-api-tls.conf` if `/etc/letsencrypt/live/api.sparsan.com/fullchain.pem` exists, else the HTTP-only `deploy/nginx-api.conf`, and creates `/var/www/letsencrypt` if missing. The repo owns the site file in both states. It runs `nginx -t` before reloading and restores the old file on failure;
 8. prints the line to pin as `DEPLOY_KNOWN_HOSTS`, for example `203.0.113.10 ssh-ed25519 AAAA…`. Check it against `gcloud compute ssh $VM … --command 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub'`.
 
 There is no shared npm cache. Each build gets its own cache inside its build directory, and the cache is deleted with it.
 
-Re-run bootstrap whenever `deploy/*.service`, `deploy/nginx-api.conf` or the two scripts change. **A normal deploy never changes them.**
+Re-run bootstrap whenever `deploy/*.service`, `deploy/nginx-api.conf`, `deploy/nginx-api-tls.conf` or the two scripts change. **A normal deploy never changes them.**
 
 ### What the deploy key can do (blast radius)
 
@@ -269,10 +269,11 @@ Store the token with `gh secret set` (section 4). The account ID is shown on the
 **TLS for the API.** Do this once, after bootstrap has installed the nginx site and the DNS record resolves:
 
 ```bash
-gcloud compute ssh $VM --project $PROJECT --zone $ZONE --command 'sudo certbot --nginx -d api.sparsan.com --redirect'
+scripts/deploy.sh cert --dry-run   # prints the root script that runs on the VM
+scripts/deploy.sh cert
 ```
 
-certbot edits `loan-poc-api.conf` to add the 443 server block. From then on, a bootstrap re-run sees "managed by Certbot" and leaves that file alone. To change the proxy settings later, edit the file on the VM, then run `nginx -t && systemctl reload nginx`. This includes the access-log format that keeps the WebSocket token (in `/ws?token=`) out of the logs: if the file on the VM predates it, copy the `log_format loan_poc_noquery` and `access_log` lines from `deploy/nginx-api.conf` into it.
+`cert` installs the HTTP nginx site (it serves `/.well-known/acme-challenge/` from `/var/www/letsencrypt`), runs `certbot certonly --webroot -w /var/www/letsencrypt -d api.sparsan.com --keep-until-expiring --deploy-hook "systemctl reload nginx"`, then re-installs the site as the TLS variant (443 with HSTS, 80 redirects to https), with `nginx -t` and restore-on-failure. The VM's certbot has no nginx plugin and already has an ACME account (from the co-hosted site), so no email flags are passed and the account is reused. Renewal is the existing `certbot.timer`; the stored webroot config and the deploy hook reload nginx. Re-running bootstrap later keeps the TLS variant because the certificate exists. To change proxy settings, edit `deploy/nginx-api.conf` and `deploy/nginx-api-tls.conf` together and re-run bootstrap.
 
 ## 6. First deploy and check
 

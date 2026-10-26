@@ -6,6 +6,10 @@
 #       themselves: users loandeploy/loanbuild/loanpoc, /opt/loan-poc, the root-owned activation script and SSH gate, a
 #       sudoers drop-in for that one script, systemd units, the nginx site, the CI key. Prints the host key line.
 #       Re-run it to change units/nginx/scripts or to rotate the CI key.
+#   scripts/deploy.sh cert [--dry-run]
+#       Owner-run like bootstrap: installs the nginx site (serves the ACME challenge), runs certbot in webroot mode for
+#       api.sparsan.com (reusing the VM's existing certbot account; renewal is the existing certbot.timer), then
+#       switches the nginx site to the TLS variant. Safe to re-run.
 #   scripts/deploy.sh api [--dry-run] [--skip-build]
 #       Type-check, `git archive` HEAD into a release tarball, upload it over SSH as loandeploy, activate it.
 #   scripts/deploy.sh web-build | web | all [--dry-run] [--skip-build]
@@ -54,16 +58,16 @@ SKIP_BUILD=0
 PUBKEY_FILE=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    bootstrap|api|web|web-build|all) MODE="$1" ;;
+    bootstrap|cert|api|web|web-build|all) MODE="$1" ;;
     --dry-run) DRY_RUN=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
     --pubkey) shift; PUBKEY_FILE="${1:-}" ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
 done
-[ -n "$MODE" ] || { sed -n '2,26p' "$0"; exit 2; }
+[ -n "$MODE" ] || { sed -n '2,30p' "$0"; exit 2; }
 
 cd "$ROOT"
 
@@ -77,6 +81,56 @@ need() { command -v "$1" >/dev/null || { echo "$1 is required" >&2; exit 1; }; }
 # Bootstrap: a root script generated locally (repo files embedded as base64) and piped to `sudo bash -s` on the VM.
 emit_file() { # <dest> <mode> <owner:group> <local file>
   printf 'put %q %q %q %q\n' "$1" "$2" "$3" "$(base64 < "$4" | tr -d '\n')"
+}
+
+# Emits the shell function install_nginx_site (plus both nginx variants as base64) for a root script run on the VM.
+# It installs nginx-api-tls.conf when the certificate exists, else nginx-api.conf; the repo owns the site file.
+nginx_function() {
+  printf 'NGINX_HTTP_B64=%q\n' "$(base64 < deploy/nginx-api.conf | tr -d '\n')"
+  printf 'NGINX_TLS_B64=%q\n' "$(base64 < deploy/nginx-api-tls.conf | tr -d '\n')"
+  printf 'PROTECTED_NGINX_SITES=%q\n' "$PROTECTED_NGINX_SITES"
+  cat <<'NGINXFN'
+install_nginx_site() {
+  local SITE=loan-poc-api.conf AVAIL ENABLED BACKUP B64 PROTECTED_BEFORE s
+  echo "--> protected nginx sites: ${PROTECTED_NGINX_SITES:-none}"
+  site_sums() {
+    local s f
+    for s in $PROTECTED_NGINX_SITES; do
+      for f in "/etc/nginx/sites-available/$s" "/etc/nginx/sites-enabled/$s" "/etc/nginx/conf.d/$s.conf"; do
+        if [ -e "$f" ]; then printf '%s %s\n' "$f" "$(readlink -f "$f") $(sha256sum < "$f" | cut -d' ' -f1)"; else printf '%s absent\n' "$f"; fi
+      done
+    done
+  }
+  for s in $PROTECTED_NGINX_SITES; do
+    case "$s" in loan-poc-api|loan-poc-api.conf) echo "PROTECTED_NGINX_SITES must not name our own site ($s)" >&2; exit 1 ;; esac
+  done
+  PROTECTED_BEFORE="$(site_sums)"
+
+  echo "--> nginx site $SITE"
+  # The certbot webroot (shared with any co-hosted site); create it only if missing, never change an existing one.
+  [ -d /var/www/letsencrypt ] || install -d -m 755 /var/www/letsencrypt
+  if [ -f /etc/letsencrypt/live/api.sparsan.com/fullchain.pem ]; then B64="$NGINX_TLS_B64"; echo "    certificate found: TLS variant"
+  else B64="$NGINX_HTTP_B64"; echo "    no certificate yet: HTTP variant (run: scripts/deploy.sh cert)"; fi
+  if [ -d /etc/nginx/sites-available ]; then AVAIL="/etc/nginx/sites-available/$SITE"; ENABLED="/etc/nginx/sites-enabled/$SITE"
+  else AVAIL="/etc/nginx/conf.d/$SITE"; ENABLED=""; fi
+  BACKUP=""; if [ -f "$AVAIL" ]; then BACKUP="$(mktemp)"; cp "$AVAIL" "$BACKUP"; fi
+  put "$AVAIL" 644 root:root "$B64"
+  if [ -n "$ENABLED" ]; then ln -sfn "$AVAIL" "$ENABLED"; fi
+  if ! nginx -t; then
+    echo "nginx -t failed; restoring the previous $SITE" >&2
+    if [ -n "$BACKUP" ]; then cp "$BACKUP" "$AVAIL"; else rm -f "$AVAIL"; [ -z "$ENABLED" ] || rm -f "$ENABLED"; fi
+    exit 1
+  fi
+  [ -z "$BACKUP" ] || rm -f "$BACKUP"
+  systemctl reload nginx
+
+  if [ "$(site_sums)" != "$PROTECTED_BEFORE" ]; then
+    echo "a protected nginx site changed during the nginx install; investigate before continuing:" >&2
+    diff <(printf '%s\n' "$PROTECTED_BEFORE") <(site_sums) >&2 || true
+    exit 1
+  fi
+}
+NGINXFN
 }
 
 bootstrap_script() {
@@ -127,25 +181,10 @@ HEAD
   emit_file /usr/local/sbin/loan-poc-ssh-gate 755 root:root deploy/loan-poc-ssh-gate
   emit_file /etc/systemd/system/loan-mocks.service 644 root:root deploy/loan-mocks.service
   emit_file /etc/systemd/system/loan-api.service 644 root:root deploy/loan-api.service
-  printf 'NGINX_B64=%q\n' "$(base64 < deploy/nginx-api.conf | tr -d '\n')"
+  nginx_function
   printf 'PUBKEY=%q\n' "$pubkey"
   printf 'DEPLOY_HOST=%q\n' "$DEPLOY_HOST"
-  printf 'PROTECTED_NGINX_SITES=%q\n' "$PROTECTED_NGINX_SITES"
   cat <<'TAIL'
-
-echo "--> protected nginx sites: ${PROTECTED_NGINX_SITES:-none}"
-site_sums() {
-  local s f
-  for s in $PROTECTED_NGINX_SITES; do
-    for f in "/etc/nginx/sites-available/$s" "/etc/nginx/sites-enabled/$s" "/etc/nginx/conf.d/$s.conf"; do
-      if [ -e "$f" ]; then printf '%s %s\n' "$f" "$(readlink -f "$f") $(sha256sum < "$f" | cut -d' ' -f1)"; else printf '%s absent\n' "$f"; fi
-    done
-  done
-}
-for s in $PROTECTED_NGINX_SITES; do
-  case "$s" in loan-poc-api|loan-poc-api.conf) echo "PROTECTED_NGINX_SITES must not name our own site ($s)" >&2; exit 1 ;; esac
-done
-PROTECTED_BEFORE="$(site_sums)"
 
 echo "--> sudoers: loandeploy may run only loan-poc-activate"
 tmp="$(mktemp)"
@@ -166,29 +205,7 @@ echo "--> systemd units"
 systemctl daemon-reload
 systemctl enable loan-mocks loan-api >/dev/null
 
-echo "--> nginx site loan-poc-api.conf"
-SITE=loan-poc-api.conf
-if [ -d /etc/nginx/sites-available ]; then AVAIL="/etc/nginx/sites-available/$SITE"; ENABLED="/etc/nginx/sites-enabled/$SITE"
-else AVAIL="/etc/nginx/conf.d/$SITE"; ENABLED=""; fi
-if [ -f "$AVAIL" ] && grep -q 'managed by Certbot' "$AVAIL"; then
-  echo "    $AVAIL is managed by certbot; leaving it unchanged"
-else
-  BACKUP=""; if [ -f "$AVAIL" ]; then BACKUP="$(mktemp)"; cp "$AVAIL" "$BACKUP"; fi
-  put "$AVAIL" 644 root:root "$NGINX_B64"
-  if [ -n "$ENABLED" ]; then ln -sfn "$AVAIL" "$ENABLED"; fi
-  if ! nginx -t; then
-    echo "nginx -t failed; restoring the previous $SITE" >&2
-    if [ -n "$BACKUP" ]; then cp "$BACKUP" "$AVAIL"; else rm -f "$AVAIL"; [ -z "$ENABLED" ] || rm -f "$ENABLED"; fi
-    exit 1
-  fi
-  systemctl reload nginx
-fi
-
-if [ "$(site_sums)" != "$PROTECTED_BEFORE" ]; then
-  echo "a protected nginx site changed during bootstrap; investigate before continuing:" >&2
-  diff <(printf '%s\n' "$PROTECTED_BEFORE") <(site_sums) >&2 || true
-  exit 1
-fi
+install_nginx_site
 
 if [ -L "$APP/current" ]; then
   echo "--> restart (units may have changed)"; systemctl restart loan-mocks loan-api
@@ -217,10 +234,47 @@ do_bootstrap() {
       "$GCP_PROJECT" "$VM_NAME" "$VM_ZONE" "${DEPLOY_HOST:-<unset>}" "$PROTECTED_NGINX_SITES"
     printf '[dry-run] gcloud compute ssh %s --project %s --zone %s --command "sudo bash -s" <<bootstrap script>>\n' \
       "$VM_NAME" "$GCP_PROJECT" "$VM_ZONE"
-    bootstrap_script "$pubkey" | sed -E 's/^(put [^ ]+ [^ ]+ [^ ]+ ).*/\1<base64 of the repo file>/; s/^(NGINX_B64=).*/\1<base64 of deploy\/nginx-api.conf>/' | sed 's/^/    | /'
+    bootstrap_script "$pubkey" | sed -E 's/^(put [^ ]+ [^ ]+ [^ ]+ ).*/\1<base64 of the repo file>/; s/^(NGINX_(HTTP|TLS)_B64=).*/\1<base64 of the nginx variant>/' | sed 's/^/    | /'
   else
     need gcloud
     bootstrap_script "$pubkey" | gcloud compute ssh "$VM_NAME" --project "$GCP_PROJECT" --zone "$VM_ZONE" --command "sudo bash -s"
+  fi
+}
+
+# ---------------------------------------------------------------------------------------------
+# cert: issue/renew the API certificate with certbot in webroot mode, then switch the nginx site to the TLS variant.
+# The VM's certbot already has an ACME account (from the co-hosted site), so no email flags are passed and it is reused.
+# The nginx site must already serve /.well-known/acme-challenge/ from /var/www/letsencrypt, so the HTTP variant is
+# installed first; renewals are handled by the existing certbot.timer, and the deploy hook reloads nginx.
+cert_script() {
+  cat <<'CERTHEAD'
+set -euo pipefail
+umask 022
+export LC_ALL=C
+put() { local tmp; tmp="$(mktemp)"; printf '%s' "$4" | base64 -d > "$tmp"; install -m "$2" -o "${3%%:*}" -g "${3##*:}" "$tmp" "$1"; rm -f "$tmp"; }
+CERTHEAD
+  nginx_function
+  cat <<'CERTTAIL'
+command -v certbot >/dev/null || { echo "certbot is not installed on the VM" >&2; exit 1; }
+install_nginx_site
+echo "--> certbot (webroot)"
+certbot certonly --webroot -w /var/www/letsencrypt -d api.sparsan.com --non-interactive --agree-tos --keep-until-expiring --deploy-hook "systemctl reload nginx"
+install_nginx_site
+echo "Certificate in place; nginx now serves the TLS variant."
+CERTTAIL
+}
+
+do_cert() {
+  local missing="" v
+  for v in GCP_PROJECT VM_NAME VM_ZONE; do [ -n "${!v}" ] || missing="$missing $v"; done
+  [ -z "$missing" ] || { echo "cert needs:${missing} (set them, or put them in deploy/local.env)" >&2; exit 2; }
+  log "cert for api.sparsan.com on ${VM_NAME} (${GCP_PROJECT}/${VM_ZONE})"
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '[dry-run] gcloud compute ssh %s --project %s --zone %s --command "sudo bash -s" <<cert script>>\n' "$VM_NAME" "$GCP_PROJECT" "$VM_ZONE"
+    cert_script | sed -E 's/^(NGINX_(HTTP|TLS)_B64=).*/\1<base64 of the nginx variant>/' | sed 's/^/    | /'
+  else
+    need gcloud
+    cert_script | gcloud compute ssh "$VM_NAME" --project "$GCP_PROJECT" --zone "$VM_ZONE" --command "sudo bash -s"
   fi
 }
 
@@ -291,6 +345,7 @@ deploy_web() {
 
 case "$MODE" in
   bootstrap) do_bootstrap ;;
+  cert) do_cert ;;
   api) deploy_api ;;
   web-build) build_web ;;
   web) deploy_web ;;
