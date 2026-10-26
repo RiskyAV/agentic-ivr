@@ -126,6 +126,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     eventLogDir: str(env, 'EVENT_LOG_DIR', fileURLToPath(new URL('../../../.data/events', import.meta.url))),
     engine: engineConfigFromEnv({ ...env, GEMINI_MODEL: model }),
   };
+  if (env.NODE_ENV === 'production' && !config.demoAccessCode) {
+    warnings.push('NODE_ENV=production with an empty DEMO_ACCESS_CODE: anyone with the URL can log in and change chaos.');
+  }
   if (!config.voice.elevenLabsApiKey || !config.voice.voiceId) warnings.push('ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID not set; voice mode is disabled.');
   return { config, warnings };
 }

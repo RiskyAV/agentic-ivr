@@ -1,0 +1,43 @@
+#!/bin/bash
+# /usr/local/sbin/loan-poc-ssh-gate   (root-owned; installed by `scripts/deploy.sh bootstrap`)
+#
+# Forced command for the CI deploy key (authorized_keys: restrict,command="/usr/local/sbin/loan-poc-ssh-gate").
+# Whatever the client asks for, only two requests are accepted:
+#   upload <id> <sha256>   stdin -> /opt/loan-poc/incoming/<id>.tgz (max 50 MB) and <id>.sha256
+#   activate <id>          sudo /usr/local/sbin/loan-poc-activate <id>
+# No shell, no scp/sftp, no forwarding, no pty.
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+IN=/opt/loan-poc/incoming
+MAX_BYTES=$((50 * 1024 * 1024))
+ID_RE='^[0-9]{8}T[0-9]{6}-[0-9a-f]{7,40}$'
+
+deny() { echo "denied: $*" >&2; exit 1; }
+
+read -r -a args <<< "${SSH_ORIGINAL_COMMAND:-}"
+case "${args[0]:-}" in
+  upload)
+    [ "${#args[@]}" -eq 3 ] || deny "usage: upload <id> <sha256>"
+    id="${args[1]}"; sum="${args[2]}"
+    [[ "$id" =~ $ID_RE ]] || deny "invalid release id"
+    [[ "$sum" =~ ^[0-9a-f]{64}$ ]] || deny "invalid sha256"
+    umask 027
+    tmp="$(mktemp "$IN/.upload.XXXXXX")"
+    trap 'rm -f -- "$tmp"' EXIT
+    head -c $((MAX_BYTES + 1)) > "$tmp"
+    [ "$(stat -c %s "$tmp")" -le "$MAX_BYTES" ] || deny "upload larger than $MAX_BYTES bytes"
+    mv -f -- "$tmp" "$IN/$id.tgz"
+    trap - EXIT
+    printf '%s  %s.tgz\n' "$sum" "$id" > "$IN/$id.sha256"
+    echo "uploaded $id"
+    ;;
+  activate)
+    [ "${#args[@]}" -eq 2 ] || deny "usage: activate <id>"
+    [[ "${args[1]}" =~ $ID_RE ]] || deny "invalid release id"
+    exec sudo -n /usr/local/sbin/loan-poc-activate "${args[1]}"
+    ;;
+  *)
+    deny "only 'upload <id> <sha256>' and 'activate <id>' are allowed"
+    ;;
+esac

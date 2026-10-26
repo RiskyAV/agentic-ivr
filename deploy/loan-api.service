@@ -17,7 +17,7 @@ Environment=HOST=127.0.0.1
 Environment=TRUST_PROXY=1
 Environment=MOCK_BASE_URL=http://127.0.0.1:4100
 Environment=EVENT_LOG_DIR=/opt/loan-poc/data/events
-# deploy.sh replaces /usr/bin/node with the VM's node path if it differs.
+# Node 22 at /usr/bin/node (bootstrap checks it). Units change only through `scripts/deploy.sh bootstrap`.
 ExecStart=/usr/bin/node --import tsx apps/server/src/main.ts
 Restart=always
 RestartSec=2

@@ -34,7 +34,7 @@ COPY packages/domain/package.json packages/domain/
 COPY apps/mock-systems/package.json apps/mock-systems/
 COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
-RUN npm ci --omit=dev --no-audit --no-fund \
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
       --workspace @app/server --workspace @app/mock-systems --include-workspace-root \
  && npm cache clean --force
 COPY --from=build /app/packages/shared/src packages/shared/src

@@ -10,7 +10,7 @@ WorkingDirectory=/opt/loan-poc/current
 EnvironmentFile=/opt/loan-poc/.env
 Environment=NODE_ENV=production
 Environment=MOCK_PORT=4100
-# deploy.sh replaces /usr/bin/node with the VM's node path if it differs.
+# Node 22 at /usr/bin/node (bootstrap checks it). Units change only through `scripts/deploy.sh bootstrap`.
 ExecStart=/usr/bin/node --import tsx apps/mock-systems/src/main.ts
 Restart=always
 RestartSec=2

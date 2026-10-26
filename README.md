@@ -115,15 +115,21 @@ The image runs the server and the mock systems: `scripts/start.sh` supervises bo
 ## Deployment (GitHub Actions)
 
 - `.github/workflows/ci.yml` runs on every push and pull request: type-check, tests, and a gitleaks scan of the full history. It needs no secrets.
-- `.github/workflows/deploy.yml` runs only on a push to `main` (or a manual run on `main`) of `RiskyAV/agentic-ivr`, after CI passes. The `api` job authenticates to GCP through Workload Identity Federation (no keys) and runs `scripts/deploy.sh api`, then checks `https://api.sparsan.com/api/health`. The `web` job builds the app and deploys it to Cloudflare Pages.
-- `scripts/deploy.sh [api|web|all] [--dry-run]` holds the deploy steps for both CI and local use.
-- The one-time bootstrap (repository, GCP, Cloudflare, DNS, VM) is in [deploy/SETUP.md](deploy/SETUP.md).
+- `.github/workflows/deploy.yml` runs only on a push to `main` (or a manual run on `main`) of `RiskyAV/agentic-ivr`, after CI passes.
+  - The `api` job uploads a `git archive` release over SSH as a locked-down deploy user and activates it with a root-owned script. The script installs the dependencies, swaps the release, restarts, health-checks and rolls back on failure. The job then checks that `https://api.sparsan.com/api/health` returns `"ok":true`.
+  - The `web` job builds the app and deploys it to Cloudflare Pages.
+- `scripts/deploy.sh bootstrap|api|web|all [--dry-run]` holds the deploy steps for both CI and local use. `bootstrap` is the owner's one-time VM setup.
+- The one-time setup (repository hardening, deploy key, VM bootstrap, Cloudflare, DNS) is in [deploy/SETUP.md](deploy/SETUP.md).
 
 ## Security and secrets
 
 - **App secrets** (Gemini and ElevenLabs keys, session secret, demo access code) live **only on the VM**, in `/opt/loan-poc/.env` (mode 640). They are copied once by hand. No workflow writes them, and the browser never sees them.
-- **CI** holds no cloud keys. Deploys use short-lived OIDC tokens through Workload Identity Federation, restricted to pushes to `main` of this repository and bound to the `production` environment. The Cloudflare token is an environment secret scoped to Pages edit.
-- **The repository** is public, but only the owner can push (configured as in [deploy/SETUP.md](deploy/SETUP.md) §2). A ruleset protects `main`, fork PR workflows need approval, the default token is read-only, the actions are allow-listed, and gitleaks runs on every push. Before the first push the full local history was scanned. `.env`, `.data/` and `.superpowers/` are git-ignored.
+- **CI** holds no cloud credentials, only the following, all as secrets of the `production` environment, which runs on `main` only:
+  - an SSH deploy key, with its host key pinned;
+  - a Cloudflare token scoped to Pages edit.
+
+  On the VM, the deploy key is a forced command. It can only upload a release tarball to `/opt/loan-poc/incoming/` and run the one activation script that `sudo` allows. It has no shell, no forwarding, and no access to nginx, systemd or the other site on the VM. The worst case for a leaked key is deploying application code that runs as the unprivileged app user ([deploy/SETUP.md §3](deploy/SETUP.md#3-deploy-key-and-vm-bootstrap)).
+- **The repository** is public, but only the owner can push (configured as in [deploy/SETUP.md](deploy/SETUP.md) §2). A ruleset protects `main`, fork PR workflows need approval, the default token is read-only and the actions are allow-listed. CI scans the full history with gitleaks on every push. `.env`, `.data/` and `.superpowers/` are git-ignored.
 - **In the app:**
   - data access is scoped server-side to the signed-in customer;
   - the model can only propose actions; execution needs the customer's confirmation, bound to the exact terms;

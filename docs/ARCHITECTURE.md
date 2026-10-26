@@ -230,7 +230,7 @@ Voice misses the spec's "under 1 s for no-tool turns" goal by about 2 s. That is
 | Data minimisation (D-022) | PAN, phone, email and account numbers are masked (`XXXXXX1234`) before prompts, logs and traces. |
 | Malicious input (D-026, D-043) | Rule check plus a classifier, running in parallel with the turn. Proposals are held until the guard allows. A blocked turn is retracted and refused, with escalation from the second strike. Backend free text is wrapped as untrusted. |
 | Red team | 15/15 on every run: injection, impersonation, cross-customer access, fee-waiver coercion, prompt extraction, malicious dispute text and abuse. 2/2 crafted "confirm proposal PRP-…" messages executed nothing. |
-| Hosted demo (D-052) | `DEMO_ACCESS_CODE` gates login and chaos changes. `TEST_HOOKS` is refused in production. The API binds to loopback behind nginx. Secrets live only on the server; the browser never talks to Gemini or ElevenLabs. |
+| Hosted demo (D-052) | `DEMO_ACCESS_CODE` gates login and chaos changes. `TEST_HOOKS` is refused in production. The API binds to loopback behind nginx. Secrets live only on the server; the browser never talks to Gemini or ElevenLabs. The CI deploy holds no cloud credentials: an SSH key restricted to a forced command can only upload a release and run one root-owned activation script (verify, install as the app user, swap, health-check, roll back). See `deploy/SETUP.md`. |
 
 Limits: there is no real authentication (picker plus a fixed OTP), and the guard is fail-open. A classifier timeout lets the text through, but drops any proposals from that turn.
 

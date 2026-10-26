@@ -12,6 +12,8 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ LLM_PROVIDER: 'stub', TEST_HOOKS: '1', NODE_ENV: 'production' })).toThrow(/TEST_HOOKS/);
     expect(loadConfig({ LLM_PROVIDER: 'stub', TEST_HOOKS: '1' }).config.testHooks).toBe(true);
     expect(loadConfig({ LLM_PROVIDER: 'stub', NODE_ENV: 'production' }).config.testHooks).toBe(false);
+    expect(loadConfig({ LLM_PROVIDER: 'stub', NODE_ENV: 'production' }).warnings.join(' ')).toMatch(/DEMO_ACCESS_CODE/);
+    expect(loadConfig({ LLM_PROVIDER: 'stub', NODE_ENV: 'production', DEMO_ACCESS_CODE: 'x' }).warnings.join(' ')).not.toMatch(/DEMO_ACCESS_CODE/);
   });
 
   it('rejects an unknown provider and malformed numbers', () => {
