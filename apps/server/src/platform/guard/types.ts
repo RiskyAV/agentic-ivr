@@ -20,6 +20,11 @@ export interface GuardContext {
 
 export interface Guard {
   check(text: string, ctx: GuardContext, signal: AbortSignal): Promise<GuardVerdict>;
+  /**
+   * Synchronous rules only (no model call). The engine runs it before the first LLM call: a block here means the
+   * LLM never runs and only the refusal is emitted. Optional so simple test guards need not implement it.
+   */
+  precheck?(text: string, ctx: GuardContext): GuardVerdict | null;
 }
 
 /** Builds the customer-facing refusal for a blocked turn; `strikes` already includes this one. */

@@ -710,10 +710,10 @@ export class VoiceSession {
       },
       retract: (replacement) => {
         this.send({ type: 'assistant_retract', turnId, replacement });
-        // Stop the withdrawn audio and say the replacement instead.
+        // Stop the withdrawn audio and say the replacement instead. Not a barge-in: the customer did not interrupt.
         if (!u.closed) {
           u.closeHard();
-          this.send({ type: 'barge_in', turnId });
+          this.send({ type: 'audio_flush', turnId, reason: 'retract' });
         }
         const r = this.newUtterance(++session.turnSeq, turnId, this.now());
         r.say(replacement, true);

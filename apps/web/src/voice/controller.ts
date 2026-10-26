@@ -213,7 +213,8 @@ export class VoiceController {
       case 'tts_end':
         this.player?.end(m.turnSeq);
         break;
-      case 'barge_in': {
+      case 'barge_in':
+      case 'audio_flush': {
         if (!this.player) break;
         for (const r of this.player.flushAll()) this.report(r.turnSeq, r.playedMs);
         this.debug.playing = false;

@@ -159,6 +159,19 @@ describe('store reducer', () => {
     expect(late.items.find((i) => i.kind === 'assistant')).toMatchObject({ interrupted: true, text: 'Hi there' });
   });
 
+  it('a guard retract in voice (audio_flush) replaces the text without labelling it interrupted', () => {
+    const s = run([
+      { type: 'assistant_delta', turnId: 't1', text: 'Here is' },
+      { type: 'assistant_retract', turnId: 't1', replacement: "I can't help with that." },
+      { type: 'audio_flush', turnId: 't1', reason: 'retract' },
+      { type: 'assistant_done', turnId: 't1', text: "I can't help with that.", sources: [] },
+    ]);
+    const a = s.items.find((i) => i.kind === 'assistant');
+    expect(a).toMatchObject({ text: "I can't help with that.", retracted: true });
+    expect(a).not.toHaveProperty('interrupted');
+    expect(s.interruptedTurns).toEqual([]);
+  });
+
   it('a partial transcript is the live caption; the final one clears it (the bubble comes from turn_start)', () => {
     expect(run([{ type: 'transcript', text: "what's my", final: false }]).voice.caption).toBe("what's my");
     const done = run([{ type: 'transcript', text: "what's my next EMI", final: true }, { type: 'turn_start', turnId: 't1', channel: 'voice', userText: "What's my next EMI?" }]);

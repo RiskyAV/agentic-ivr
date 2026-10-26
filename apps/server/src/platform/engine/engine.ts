@@ -191,7 +191,10 @@ export class Engine {
 
     const budget = new AbortController();
     const budgetTimer = setTimeout(() => budget.abort(), Math.max(0, cfg.turnBudgetMs));
-    const roundSignal = AbortSignal.any([signal, budget.signal]);
+    // Aborted when the guard blocks mid-turn: the LLM round and tool waits stop at once (D-053).
+    const guardBlock = new AbortController();
+    const roundSignal = AbortSignal.any([signal, budget.signal, guardBlock.signal]);
+    const toolSignal = AbortSignal.any([signal, guardBlock.signal]);
     // Not tied to the turn signal: an aborted turn still needs the verdict before its input enters history.
     const guardCtl = new AbortController();
     const entitiesBefore = structuredClone(session.entities);
@@ -214,7 +217,7 @@ export class Engine {
     let finished = false;
 
     const emit = (t: string) => {
-      if (!t || signal.aborted) return;
+      if (!t || signal.aborted || guardBlock.signal.aborted) return;
       if (firstDeltaAt === undefined) firstDeltaAt = elapsed();
       shown += t;
       sink.delta(t);
@@ -249,7 +252,7 @@ export class Engine {
       if (verdict || !this.deps.guard) return;
       if (!guardP) return; // the turn ended before the guard started: nothing was screened, and nothing ran either
       const v = await Promise.race([guardP, sleep(waitMs), ...(abortable ? [onAbort(signal)] : [])]);
-      if (v === 'aborted') return;
+      if (v === 'aborted' || verdict) return; // `verdict` may have been recorded by the early-block listener meanwhile
       recordVerdict(v && v !== 'timeout' ? v : { verdict: 'allow', by: 'timeout', ms: Math.round(performance.now() - guardT0) });
     };
     /**
@@ -295,95 +298,112 @@ export class Engine {
       const snapshot: CustomerSnapshot = session.snapshot ?? { customerId: session.customerId, loans: [], recentPayments: [], fetchedAt: new Date().toISOString(), partial: ['crm', 'lms'] };
       Object.assign(values, snapshotValues(snapshot), entityValues(session.entities));
 
-      // 1. Guard runs in parallel with the whole turn.
+      // 1. Guard. The synchronous rules run first: a rules block skips the LLM entirely (no deltas, only the refusal).
+      // Otherwise the classifier runs in parallel with the whole turn, and a block that arrives mid-turn aborts the
+      // LLM round and tool waits at once, so a blocked answer is not streamed or spoken to the end (D-053).
       guardT0 = performance.now();
-      guardP = this.deps.guard
-        ?.check(
-          input.text,
-          {
-            customerName: snapshot.customer?.name ?? '',
-            otherCustomerNames: this.otherNames(session.customerId, snapshot.customer?.name),
-            ownedLoanIds: snapshot.loans.map((l) => l.loanId),
-            strikes: session.guardStrikes,
-          },
-          guardCtl.signal,
-        )
-        .catch(() => null);
-
-      // 2. Prompt.
-      const wf = this.workflow(session);
-      const prompt = buildPrompt({
-        wf, snapshot, entities: session.entities, history: session.history, channel, values, policySummaries: this.policies(wf),
-      });
-      const messages: LlmMessage[] = [...prompt.messages, { role: 'user', text: input.text }];
-      const decls = this.declarations(wf);
-      const ctxBase: Omit<ToolContext, 'signal'> = {
-        customerId: session.customerId, session, turnId, channel, connectors: this.deps.connectors, tracer, today: today(),
-      };
-
-      let stopNoticeSent = false;
-      for (let round = 0; ; round++) {
-        if (signal.aborted) return await finishAborted();
-        const req: LlmRequest = { system: prompt.system, tools: decls, messages: [...messages], ...(cfg.model && { model: cfg.model }) };
-        log({ type: 'llm_request', promptHash: sha(prompt.system + JSON.stringify(messages)), prefixHash: prompt.prefixHash, model: cfg.model ?? 'default', round });
-        const chunks: LlmChunk[] = [];
-        const endSpan = tracer.span('llm', { round });
-        const reqAt = performance.now();
-        let raw = '';
-        const calls: ToolCall[] = [];
-        let usage: unknown;
-        let failure: unknown;
-        try {
-          await limiter.run(async () => {
-            for await (const c of llm.stream(req, roundSignal)) {
-              if (roundSignal.aborted) break;
-              if (chunks.length === 0 && round === 0) {
-                const ms = performance.now() - reqAt;
-                metrics.record('llm_first_token', ms);
-                tracer.setMetric('llm_first_token', Math.round(ms));
-              }
-              chunks.push(c);
-              if (c.type === 'text') { raw += c.text; emit(renderer.push(c.text)); }
-              else if (c.type === 'tool_calls') calls.push(...c.calls);
-              else if (c.type === 'done') { usage = c.usage; if (c.blocked) llmBlocked = true; }
-            }
-            if (roundSignal.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
-          }, roundSignal);
-          emit(renderer.end());
-        } catch (e) {
-          failure = e;
-        }
-        endSpan({ chunks: chunks.length, ...(failure !== undefined && { error: failure instanceof Error ? failure.name : 'error' }) });
-        log({ type: 'llm_response', round, chunks, ...(usage !== undefined && { usage }) });
-        if (signal.aborted) return await finishAborted();
-        if (failure !== undefined) {
-          status = 'degraded';
-          if (failure instanceof LimiterTimeout) appendNote(HIGH_DEMAND_MESSAGE);
-          else if (budget.signal.aborted) appendNote(DEGRADED_FALLBACK);
-          else appendNote(shown ? DEGRADED_FALLBACK : ERROR_FALLBACK);
-          break;
-        }
-        if (llmBlocked || calls.length === 0) break;
-
-        // 4. Tool round.
-        messages.push({ role: 'assistant', ...(raw && { text: raw }), toolCalls: calls });
-        let results: ToolResponse[];
-        const outOfTime = remaining() < cfg.reserveMs;
-        if (outOfTime || toolRounds >= cfg.maxToolRounds) {
-          if (stopNoticeSent) { status = 'degraded'; appendNote(DEGRADED_FALLBACK); break; }
-          stopNoticeSent = true;
-          const error = outOfTime ? 'time_budget_exceeded' : 'tool_limit_reached';
-          tracer.mark(error);
-          results = calls.map((c) => ({
-            callId: c.id, name: c.name,
-            response: { error, message: 'No more checks can run in this turn. Answer with what you already have and say what you could not check.' },
-          }));
+      let preBlocked = false;
+      if (this.deps.guard) {
+        const guardCtx = {
+          customerName: snapshot.customer?.name ?? '',
+          otherCustomerNames: this.otherNames(session.customerId, snapshot.customer?.name),
+          ownedLoanIds: snapshot.loans.map((l) => l.loanId),
+          strikes: session.guardStrikes,
+        };
+        const pre = this.deps.guard.precheck?.(input.text, guardCtx) ?? null;
+        if (pre?.verdict === 'block') {
+          recordVerdict(pre);
+          preBlocked = true;
         } else {
-          toolRounds++;
-          results = await this.runTools(calls, { ctxBase, wf, sink, signal, remaining, cfg, values, stale: staleAsOf, sources, tables, toolEntries, held, updateEntities, finishedRef: () => finished || signal.aborted });
-          if (signal.aborted) return await finishAborted();
+          guardP = this.deps.guard.check(input.text, guardCtx, guardCtl.signal).catch(() => null);
+          void guardP.then((v) => {
+            if (v?.verdict !== 'block' || verdict) return;
+            recordVerdict(v);
+            tracer.mark('guard_block_early');
+            guardBlock.abort();
+          });
         }
-        messages.push({ role: 'tool', results });
+      }
+
+      if (!preBlocked) {
+        // 2. Prompt.
+        const wf = this.workflow(session);
+        const prompt = buildPrompt({
+          wf, snapshot, entities: session.entities, history: session.history, channel, values, policySummaries: this.policies(wf),
+        });
+        const messages: LlmMessage[] = [...prompt.messages, { role: 'user', text: input.text }];
+        const decls = this.declarations(wf);
+        const ctxBase: Omit<ToolContext, 'signal'> = {
+          customerId: session.customerId, session, turnId, channel, connectors: this.deps.connectors, tracer, today: today(),
+        };
+
+        let stopNoticeSent = false;
+        for (let round = 0; ; round++) {
+          if (signal.aborted) return await finishAborted();
+          if (guardBlock.signal.aborted) break;
+          const req: LlmRequest = { system: prompt.system, tools: decls, messages: [...messages], ...(cfg.model && { model: cfg.model }) };
+          log({ type: 'llm_request', promptHash: sha(prompt.system + JSON.stringify(messages)), prefixHash: prompt.prefixHash, model: cfg.model ?? 'default', round });
+          const chunks: LlmChunk[] = [];
+          const endSpan = tracer.span('llm', { round });
+          const reqAt = performance.now();
+          let raw = '';
+          const calls: ToolCall[] = [];
+          let usage: unknown;
+          let failure: unknown;
+          try {
+            await limiter.run(async () => {
+              for await (const c of llm.stream(req, roundSignal)) {
+                if (roundSignal.aborted) break;
+                if (chunks.length === 0 && round === 0) {
+                  const ms = performance.now() - reqAt;
+                  metrics.record('llm_first_token', ms);
+                  tracer.setMetric('llm_first_token', Math.round(ms));
+                }
+                chunks.push(c);
+                if (c.type === 'text') { raw += c.text; emit(renderer.push(c.text)); }
+                else if (c.type === 'tool_calls') calls.push(...c.calls);
+                else if (c.type === 'done') { usage = c.usage; if (c.blocked) llmBlocked = true; }
+              }
+              if (roundSignal.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
+            }, roundSignal);
+            emit(renderer.end());
+          } catch (e) {
+            failure = e;
+          }
+          endSpan({ chunks: chunks.length, ...(failure !== undefined && { error: failure instanceof Error ? failure.name : 'error' }) });
+          log({ type: 'llm_response', round, chunks, ...(usage !== undefined && { usage }) });
+          if (signal.aborted) return await finishAborted();
+          if (guardBlock.signal.aborted) break;
+          if (failure !== undefined) {
+            status = 'degraded';
+            if (failure instanceof LimiterTimeout) appendNote(HIGH_DEMAND_MESSAGE);
+            else if (budget.signal.aborted) appendNote(DEGRADED_FALLBACK);
+            else appendNote(shown ? DEGRADED_FALLBACK : ERROR_FALLBACK);
+            break;
+          }
+          if (llmBlocked || calls.length === 0) break;
+
+          // 4. Tool round.
+          messages.push({ role: 'assistant', ...(raw && { text: raw }), toolCalls: calls });
+          let results: ToolResponse[];
+          const outOfTime = remaining() < cfg.reserveMs;
+          if (outOfTime || toolRounds >= cfg.maxToolRounds) {
+            if (stopNoticeSent) { status = 'degraded'; appendNote(DEGRADED_FALLBACK); break; }
+            stopNoticeSent = true;
+            const error = outOfTime ? 'time_budget_exceeded' : 'tool_limit_reached';
+            tracer.mark(error);
+            results = calls.map((c) => ({
+              callId: c.id, name: c.name,
+              response: { error, message: 'No more checks can run in this turn. Answer with what you already have and say what you could not check.' },
+            }));
+          } else {
+            toolRounds++;
+            results = await this.runTools(calls, { ctxBase, wf, sink, signal: toolSignal, remaining, cfg, values, stale: staleAsOf, sources, tables, toolEntries, held, updateEntities, finishedRef: () => finished || signal.aborted || guardBlock.signal.aborted });
+            if (signal.aborted) return await finishAborted();
+            if (guardBlock.signal.aborted) break;
+          }
+          messages.push({ role: 'tool', results });
+        }
       }
 
       // 6. Guard verdict gates proposals and can retract the answer.

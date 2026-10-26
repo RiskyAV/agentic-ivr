@@ -110,6 +110,19 @@ describe('VoiceController', () => {
     expect(t.backend.sources.every((s) => s.stopped || s.ended)).toBe(true);
   });
 
+  it('audio_flush (guard retract) stops queued audio like a barge-in', async () => {
+    const t = setup();
+    const p = t.c.start(false);
+    t.captures[0]!.resolve({} as Capture);
+    await p;
+    t.begin(1); t.c.handleBinary(audio(1, 1000));
+    t.backend.advance(0.2);
+    t.msg({ type: 'audio_flush', turnId: 't1', reason: 'retract' });
+    expect(t.backend.sources.every((s) => s.stopped || s.ended)).toBe(true);
+    expect(t.sent.filter((m) => m.type === 'playback_report')).toHaveLength(1);
+    expect(t.state()).toBe('listening');
+  });
+
   it('a barge-in after the utterance was fully played and reported sends no second report', async () => {
     const t = setup();
     const p = t.c.start(false);

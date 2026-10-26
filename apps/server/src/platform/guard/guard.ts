@@ -13,6 +13,13 @@ export class Guard implements GuardContract {
     private readonly log: (msg: string, err?: unknown) => void = (m, e) => console.warn(`[guard] ${m}`, e ?? ''),
   ) {}
 
+  /** The synchronous rules layer alone; a block is final, null means "ask the classifier". */
+  precheck(text: string, ctx: GuardContext): GuardVerdict | null {
+    const t0 = performance.now();
+    const hit = rules(text, ctx);
+    return hit ? { verdict: 'block', category: hit.category, by: 'rules', ms: Math.round(performance.now() - t0) } : null;
+  }
+
   async check(text: string, ctx: GuardContext, signal: AbortSignal): Promise<GuardVerdict> {
     const t0 = performance.now();
     const ms = () => Math.round(performance.now() - t0);

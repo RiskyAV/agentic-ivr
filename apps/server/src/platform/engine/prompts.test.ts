@@ -65,6 +65,18 @@ describe('buildPrompt', () => {
     expect(v['snapshot.HL-88231.remaining_months']).toEqual({ kind: 'months', n: 198 });
   });
 
+  it('snapshot.as_of uses the demo clock date, not the real fetch date', () => {
+    const orig = process.env.DEMO_TODAY;
+    process.env.DEMO_TODAY = '2026-10-25';
+    try {
+      const v = snapshotValues({ ...snapshot, fetchedAt: '2026-10-27T01:15:00.000Z' });
+      expect(v['snapshot.as_of']).toEqual({ kind: 'date', iso: '2026-10-25' });
+    } finally {
+      if (orig === undefined) delete process.env.DEMO_TODAY;
+      else process.env.DEMO_TODAY = orig;
+    }
+  });
+
   it('system sections appear in stable-to-volatile order and include the rules', () => {
     const { system } = build([], 'text');
     const idx = ['{{key}}', '<untrusted_data>', 'propose_', 'Northstar Finance', 'PRE-01', '## Customer snapshot', '## Conversation memory', '## Channel style'].map((s) => system.indexOf(s));

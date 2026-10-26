@@ -8,6 +8,7 @@ import { AuditLog } from '../actions/audit.js';
 import { loadSnapshot } from '../context/snapshot.js';
 import type { Session } from '../context/session.js';
 import { Engine } from '../engine/engine.js';
+import type { Guard, GuardVerdict } from '../guard/types.js';
 import { Limiter } from '../llm/limiter.js';
 import { StubLlm, type StubRule } from '../llm/stub.js';
 import type { LlmChunk, LlmRequest } from '../llm/types.js';
@@ -64,6 +65,7 @@ async function setup(opts: {
   ttsAuto?: boolean;
   absoluteAlignment?: boolean;
   sttFactory?: () => Promise<FakeStt>;
+  guard?: Guard;
 }) {
   const h = makeHarness({});
   closers.push(h.close);
@@ -78,6 +80,7 @@ async function setup(opts: {
     llm: opts.llm ?? new StubLlm(opts.rules, { chunkDelayMs: opts.chunkDelayMs ?? 0 }),
     limiter: new Limiter(10, 1000), tools, actions, workflows, connectors: h.connectors,
     eventLog: new EventLog(mkdtempSync(join(tmpdir(), 'voice-'))), metrics, audit,
+    ...(opts.guard && { guard: opts.guard }),
     config: { turnBudgetMs: 9000, maxToolRounds: 4, toolTimeoutMs: 4000 },
   });
   const session: Session = makeSession('C1001');
@@ -146,6 +149,26 @@ describe('VoiceSession', () => {
     expect(trace.spans.map((x) => x.name)).toEqual(expect.arrayContaining(['stt_commit', 'tts_first_audio']));
     expect(trace.metrics.voice_turn_e2e_server_ms).toBeGreaterThanOrEqual(0);
     expect(s.metrics.snapshot().voice_first_audio_ms?.n).toBe(1);
+  });
+
+  it('a classifier block mid-answer cuts the TTS at once and speaks the refusal; not labelled as a barge-in', async () => {
+    const guard: Guard = {
+      check: (_t, _c, signal) => new Promise<GuardVerdict>((resolve, reject) => {
+        const t = setTimeout(() => resolve({ verdict: 'block', category: 'abuse', by: 'model', ms: 250 }), 250);
+        signal.addEventListener('abort', () => { clearTimeout(t); reject(new Error('aborted')); }, { once: true });
+      }),
+    };
+    const s = await setup({ rules: [EMI_RULE], chunkDelayMs: 80, guard });
+    s.stt.emit('committed', "what's my next EMI");
+    await waitFor(() => s.msgs('assistant_retract').length === 1, 3000, 'retract');
+    const turnId = s.msgs('turn_start')[0]!.turnId;
+    expect(s.ttsList[0]!.closed).toBe(true);
+    expect(s.msgs('audio_flush')).toEqual([{ type: 'audio_flush', turnId, reason: 'retract' }]);
+    expect(s.msgs('barge_in')).toHaveLength(0);
+    await waitFor(() => s.msgs('assistant_done').length === 1, 3000, 'done');
+    // The stream stopped early: far fewer than all 8 sentences reached the caption.
+    expect(s.msgs('assistant_delta').length).toBeLessThan(SENTENCES.length);
+    expect(s.msgs('assistant_done')[0]!.text).toBe(s.msgs('assistant_retract')[0]!.replacement);
   });
 
   it('(b) barge-in aborts the turn, stops frames, and records what was heard', async () => {

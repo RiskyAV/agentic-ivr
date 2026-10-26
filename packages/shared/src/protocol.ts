@@ -48,6 +48,10 @@ export type ServerMsg =
   | { type: 'tts_begin'; turnSeq: number; turnId: string }
   | { type: 'tts_end'; turnSeq: number }
   | { type: 'barge_in'; turnId: string }
+  /** Stop and drop this turn's queued audio without marking it interrupted (the answer was retracted by the guard). */
+  | { type: 'audio_flush'; turnId: string; reason: 'retract' }
+  /** The server ended voice for this socket; the client returns to text mode. */
+  | { type: 'voice_stopped'; reason: 'idle' | 'max_duration' | 'replaced' }
   | { type: 'trace'; trace: TurnTrace }
   | { type: 'error'; code: string; message: string };
 

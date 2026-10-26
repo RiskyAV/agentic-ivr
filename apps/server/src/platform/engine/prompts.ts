@@ -45,7 +45,9 @@ const SNAPSHOT_FIELDS = ['outstanding', 'emi', 'rate', 'next_due_date', 'remaini
 
 /** Bound values for every figure the snapshot block mentions, keyed `snapshot.<loanId>.<field>`. */
 export function snapshotValues(s: CustomerSnapshot): Record<string, BoundValue> {
-  const v: Record<string, BoundValue> = { 'snapshot.as_of': date(s.fetchedAt.slice(0, 10)) };
+  // The date part comes from the demo clock (every figure is computed against DEMO_TODAY);
+  // the real fetch time lives in s.fetchedAt and is used only for time-of-day (stale.as_of).
+  const v: Record<string, BoundValue> = { 'snapshot.as_of': date(today()) };
   for (const l of s.loans) {
     const k = (f: string) => `snapshot.${l.loanId}.${f}`;
     v[k('outstanding')] = money(l.outstanding);
