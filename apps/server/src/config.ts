@@ -30,6 +30,8 @@ export interface Config {
   stubChunkDelayMs: number;
   /** TEST_HOOKS=1 enables /api/test/* (ages the connector cache so the eval can produce a clearly stale answer). Never in production. */
   testHooks: boolean;
+  /** Each login resets that customer's mutable mock state (ops requests, payment links, idempotency); DEMO_RESET_ON_LOGIN=0 disables. */
+  demoResetOnLogin: boolean;
   voice: VoiceSettings;
   eventLogDir: string;
   engine: EngineConfig;
@@ -116,6 +118,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     maxVoiceSessions: num(env, 'MAX_VOICE_SESSIONS', 5, 0),
     stubChunkDelayMs: num(env, 'STUB_CHUNK_DELAY_MS', 0, 0),
     testHooks,
+    demoResetOnLogin: env.DEMO_RESET_ON_LOGIN !== '0',
     voice: {
       ...(env.ELEVENLABS_API_KEY?.trim() && { elevenLabsApiKey: env.ELEVENLABS_API_KEY.trim() }),
       ...(env.ELEVENLABS_VOICE_ID?.trim() && { voiceId: env.ELEVENLABS_VOICE_ID.trim() }),

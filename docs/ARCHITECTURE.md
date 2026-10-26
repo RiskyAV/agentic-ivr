@@ -10,9 +10,9 @@
 **How to evaluate this in 10 minutes**
 
 1. `npm install && cp .env.example .env` (add the keys), then `npm run dev`, then open http://localhost:5173. Or open the hosted app.
-2. Log in as **Rahul Mehta** (OTP `123456`). Ask *"Why did my EMI go up?"*, then *"What if I prepay ₹50,000 today?"*, then *"Do the reduce-tenure one."* Click a source chip, then **Confirm** on the card. Watch the account panel's *Open requests* update.
+2. Log in as **Rahul Mehta** (OTP `123456`). Each login starts that customer fresh (their mock requests, payment links and cached data are reset), so every journey can be re-run; **Reset all** is also available. Ask *"Why did my EMI go up?"*, then *"What if I prepay ₹50,000 today?"*, then *"Do the reduce-tenure one."* Click a source chip, then **Confirm** on the card. Watch the account panel's *Open requests* update.
 3. Open **Under the hood** (trace panel). Each turn shows a waterfall of guard, LLM rounds, tools and backend calls.
-4. In **Chaos controls**, set Payments to fail at 100%. Log in as **Priya Sharma** and ask *"Show my failed payments"*: she gets an honest "I can't check that right now", not an invented answer. Reset with **Reset all** (or `POST /api/chaos/reset`).
+4. In **Chaos controls**, set Payments to fail at 100%. Log in as **Priya Sharma** and ask *"Show my failed payments"*. There are two honest outcomes, never an invented answer: "I can't check that right now", or, if her payments were fetched earlier in the same session, that earlier data clearly labelled as not live with its age. Reset with **Reset all** (or `POST /api/chaos/reset`).
 5. Switch the header to **Collections call** as **Arjun Verma**. The agent opens the call, states the overdue amount, and records a promise to pay.
 6. Press the mic. Ask *"What's my next EMI?"*, interrupt it with *"actually, check my last payment first"*, then ask *"would paying ₹20,000 extra reduce my tenure?"*
 7. `npm test` (506 tests, no keys needed). With keys and a running stack, `npm run eval` regenerates [eval-report.md](eval-report.md).
@@ -168,7 +168,7 @@ The weak point of a typical RAG bot is that the model writes the numbers and pic
 1. **Figures are bound by code (D-015, D-039, D-047).** A tool returns named `values`, for example `prepay.interest_saved`. The model writes `you save {{prepay.interest_saved}}`. The streaming renderer substitutes the code-formatted value: `₹1,67,261` on screen, "one lakh sixty-seven thousand…" in speech (D-020). An unresolved placeholder fails closed and is flagged in the trace. Bound values are semantic, so there is nothing to misread: `refundable`, `disputable` and `penalty_free` instead of raw flags.
 2. **Combined tools (D-016).** `explain_emi_change`, `simulate_prepayment`, `check_foreclosure`, `list_options` and `get_overdue_summary` each fetch and compute in one call. A common question needs one tool round, not a chain the model can get wrong.
 3. **Versioned policy rules, not retrieved text (D-017, D-031).** Clauses are data: id, version, effective dates, applicability, numeric parameters and an evaluator. The version is selected by the loan's sanction date or the event date. Cited text and computed charges come from the same record (`packages/domain/src/policy/`).
-4. **Numeric check (D-039).** Any literal number the model writes anyway is compared with the turn's bound values. A mismatch is marked `[unverified]` and counted in the trace.
+4. **Numeric check (D-039).** Any literal number the model writes anyway is compared with the turn's bound values. A mismatch is flagged in the trace (metric `unverified`) and fails the eval; the text itself is not changed. Only an unresolved placeholder renders as `[unverified]` in the answer.
 5. **Evaluation (D-051).** 28 golden cases compute their expected figures at run time from the same domain code, and the scoring is strict. It checks Yes/No leads, word boundaries, invented rupee amounts, unresolved placeholders and numeric flags. See [eval-report.md](eval-report.md).
 
 **Result** (strict scorer, `gemini-3.5-flash-lite`): golden **28/28, 28/28, 28/28**; red team **15/15** on every run, plus 2/2 crafted-confirm extras. The same prompts on `gemini-2.5-flash` scored 24/28, and on `gemini-3.8-flash` 25/28. The prompts were tuned on flash-lite, so this comparison favours it.
@@ -276,7 +276,7 @@ No engine, grounding, action, guard or voice changes. The cost scales with the d
 
 **Known limitations (honest list).**
 
-- All state is in memory in a single process. A restart loses sessions, pending proposals and the audit log. The mocks reset with the process.
+- All state is in memory in a single process. A restart loses sessions, pending proposals and the audit log. The mocks reset with the process, and each login resets that customer's mock requests and payment links (demo convenience: two reviewers using the same customer at once will clear each other's requests).
 - Voice first audio (3.3 s p50) is well over the 1 s goal (see §7).
 - The prompts were tuned on one model, `gemini-3.5-flash-lite`. Other models score lower until re-tuned. Eval phrase lists can miss a correct paraphrase; the widenings are disclosed in the eval report.
 - Echo handling (browser echo cancellation plus the self-echo guard) has not been tested on open laptop speakers in a video call; the voice runs used synthetic fixtures and headphones. Push-to-talk is the fallback (see the README's video-call section).

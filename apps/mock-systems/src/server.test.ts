@@ -91,6 +91,30 @@ describe('mock systems', () => {
     expect((await app.inject({ ...req, headers: {} })).statusCode).toBe(400);
   });
 
+  it('admin reset-customer clears only that customer\'s requests, payment links and idempotency entries', async () => {
+    make();
+    const post = (customerId: string, key: string, type = 'promise_to_pay') =>
+      app.inject({ method: 'POST', url: '/ops/requests', payload: { customerId, type, params: {} }, headers: { 'idempotency-key': key } });
+    const link = (loanId: string, key: string) =>
+      app.inject({ method: 'POST', url: '/payments/links', payload: { loanId, amountPaise: 500000 }, headers: { 'idempotency-key': key } });
+    const mine = json(await post('C1003', 'k1'));
+    await post('C1001', 'k2', 'statement');
+    const myLink = json(await link('PL-60917', 'l1'));
+    const otherLink = json(await link('PL-55102', 'l2'));
+    expect((await app.inject({ method: 'POST', url: '/admin/reset-customer', payload: {} })).statusCode).toBe(400);
+    expect((await app.inject({ method: 'POST', url: '/admin/reset-customer', payload: { customerId: 'NOPE' } })).statusCode).toBe(404);
+    const r = await app.inject({ method: 'POST', url: '/admin/reset-customer', payload: { customerId: 'C1003' } });
+    expect(json(r)).toEqual({ ok: true, customerId: 'C1003', loanIds: ['PL-60917'], requests: 1, idempotency: 2 });
+    expect(json(await app.inject('/ops/requests?customerId=C1003')).requests).toEqual([]);
+    expect(json(await app.inject('/ops/requests?customerId=C1001')).requests).toHaveLength(1);
+    // The same key now creates a fresh request/link instead of replaying the old one; the other customer's still replays.
+    expect(json(await post('C1003', 'k1')).id).not.toBe(mine.id);
+    expect(json(await link('PL-60917', 'l1')).linkId).not.toBe(myLink.linkId);
+    const replay = await link('PL-55102', 'l2');
+    expect(replay.headers['x-idempotent-replay']).toBe('true');
+    expect(json(replay).linkId).toBe(otherLink.linkId);
+  });
+
   it('admin chaos: failRate 1 gives 503, reset restores; admin routes are exempt', async () => {
     make();
     const put = await app.inject({ method: 'PUT', url: '/admin/chaos', payload: { payments: { failRate: 1 } } });

@@ -40,7 +40,7 @@ export function buildMockServer(opts: MockServerOptions): FastifyInstance {
   const chaos = new Chaos(opts.chaos, opts.seed);
   let data: Dataset = buildDataset(opts.today);
   let requests = new Map<string, OpsRequest>();
-  let idem = new Map<string, { fingerprint: string; status: number; body: unknown }>();
+  let idem = new Map<string, { fingerprint: string; status: number; body: unknown; customerId: string }>();
   let srCounter = 482100;
   let linkCounter = 70100;
   const hung = new Set<FastifyReply['raw']>();
@@ -75,8 +75,8 @@ export function buildMockServer(opts: MockServerOptions): FastifyInstance {
     hung.clear();
   });
 
-  /** Runs `create` once per key; replays the original response (200) for the same body. */
-  function idempotent(req: FastifyRequest, reply: FastifyReply, scope: string, create: () => { status: number; body: unknown }) {
+  /** Runs `create` once per key; replays the original response (200) for the same body. `customerId` owns the entry (reset-customer). */
+  function idempotent(req: FastifyRequest, reply: FastifyReply, scope: string, customerId: string, create: () => { status: number; body: unknown }) {
     const key = req.headers['idempotency-key'];
     if (typeof key !== 'string' || !key) return reply.code(400).send({ error: 'idempotency_key_required' });
     const id = `${scope}:${key}`;
@@ -87,7 +87,7 @@ export function buildMockServer(opts: MockServerOptions): FastifyInstance {
       return reply.code(200).header('x-idempotent-replay', 'true').send(prior.body);
     }
     const out = create();
-    idem.set(id, { fingerprint, ...out });
+    idem.set(id, { fingerprint, ...out, customerId });
     return reply.code(out.status).send(out.body);
   }
 
@@ -148,7 +148,8 @@ export function buildMockServer(opts: MockServerOptions): FastifyInstance {
     const { loanId, amountPaise } = req.body ?? {};
     if (typeof loanId !== 'string' || !Number.isInteger(amountPaise) || (amountPaise as number) <= 0) return reply.code(400).send({ error: 'bad_request' });
     if (!data.loans.has(loanId)) return reply.code(404).send(NOT_FOUND);
-    return idempotent(req, reply, 'link', () => {
+    const owner = [...data.customers.values()].find((c) => c.loanIds.includes(loanId))?.customerId ?? '';
+    return idempotent(req, reply, 'link', owner, () => {
       const linkId = `PLK-${linkCounter++}`;
       return { status: 201, body: { linkId, url: `https://pay.northstar.example/l/${linkId}`, amountPaise, loanId, expiresAt: `${addDays(opts.today, 2)}T23:59:59.000Z` } };
     });
@@ -170,7 +171,7 @@ export function buildMockServer(opts: MockServerOptions): FastifyInstance {
     const { customerId, type, params } = req.body ?? {};
     if (typeof customerId !== 'string' || !OPS_TYPES.includes(type as OpsRequestType)) return reply.code(400).send({ error: 'bad_request' });
     if (!data.customers.has(customerId)) return reply.code(404).send(NOT_FOUND);
-    return idempotent(req, reply, 'ops', () => {
+    return idempotent(req, reply, 'ops', customerId, () => {
       const r: OpsRequest = {
         id: `SR-${srCounter++}`, customerId, type: type as OpsRequestType, params: params ?? {}, status: 'open',
         createdAt: `${opts.today}T00:00:00.000Z`,
@@ -203,6 +204,20 @@ export function buildMockServer(opts: MockServerOptions): FastifyInstance {
     return chaos.all();
   });
   app.post('/admin/reset', async () => { reset(); return { ok: true }; });
+  // Per-login demo reset: drops one customer's mutable state (ops requests incl. promises to pay, payment links,
+  // idempotency entries) so each login starts that customer's journeys fresh. Chaos and other customers are untouched.
+  app.post<{ Body: { customerId?: unknown } }>('/admin/reset-customer', async (req, reply) => {
+    const customerId = req.body?.customerId;
+    if (typeof customerId !== 'string' || !customerId) return reply.code(400).send({ error: 'bad_request' });
+    const customer = data.customers.get(customerId);
+    if (!customer) return reply.code(404).send(NOT_FOUND);
+    let removedRequests = 0;
+    let removedIdem = 0;
+    for (const [id, r] of requests) if (r.customerId === customerId) { requests.delete(id); removedRequests++; }
+    for (const [k, e] of idem) if (e.customerId === customerId) { idem.delete(k); removedIdem++; }
+    // loanIds lets the caller drop its per-loan caches too.
+    return { ok: true, customerId, loanIds: customer.loanIds, requests: removedRequests, idempotency: removedIdem };
+  });
 
   return app;
 }

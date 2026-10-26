@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { DEMO_CUSTOMERS } from '@app/mock-systems';
+import { DEMO_CUSTOMERS } from '@app/shared';
 import { loadSnapshot, toSnapshotView } from '../platform/context/snapshot.js';
 import { bearer, signToken, TOKEN_TTL_MS, verifyToken, type TokenPayload } from './auth.js';
 import type { GatewayCtx } from './context.js';
@@ -61,6 +61,34 @@ export function registerHttp(app: FastifyInstance, ctx: GatewayCtx): void {
     requiresAccessCode: ctx.config.demoAccessCode !== '',
   }));
 
+  /**
+   * Per-login demo reset: the customer's mutable mock state (ops requests incl. promises to pay, payment links,
+   * idempotency entries) is cleared and their cached connector data dropped, so every journey can be re-run by the
+   * next reviewer. Best effort: a failure never blocks the login.
+   */
+  const resetCustomer = async (customerId: string) => {
+    if (!ctx.config.demoResetOnLogin) return;
+    let loanIds: string[] = [];
+    try {
+      const res = await fetch(ctx.config.mockBaseUrl.replace(/\/+$/, '') + '/admin/reset-customer', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ customerId }), signal: AbortSignal.timeout(2000),
+      });
+      if (res.ok) loanIds = ((await res.json()) as { loanIds?: string[] }).loanIds ?? [];
+      else console.warn(`[login] demo reset for ${customerId} answered ${res.status}`);
+    } catch (e) {
+      console.warn(`[login] demo reset for ${customerId} failed: ${(e as Error).message}`);
+    }
+    for (const id of loanIds) {
+      ctx.connectors.invalidate('lms', `lms:loan:${id}`);
+      ctx.connectors.invalidate('lms', `lms:schedule:${id}:`);
+      ctx.connectors.invalidate('payments', `payments:list:${id}:`);
+    }
+    ctx.connectors.invalidate('ops', `ops:requests:${customerId}`);
+    ctx.connectors.invalidate('crm', `crm:customer:${customerId}`);
+    ctx.connectors.invalidate('crm', `crm:interactions:${customerId}`);
+    ctx.connectors.invalidate('lms', `lms:loans:${customerId}`);
+  };
+
   app.post('/api/login', async (req, reply) => {
     if (!ctx.loginLimiter.take(req.ip)) return reply.code(429).send({ error: 'rate_limited', message: 'Too many login attempts. Try again in a minute.' });
     const body = LoginBody.safeParse(req.body);
@@ -70,6 +98,7 @@ export function registerHttp(app: FastifyInstance, ctx: GatewayCtx): void {
     if (!DEMO_CUSTOMERS.some((c) => c.id === customerId)) return bad();
     if (otp !== DEMO_OTP) return bad();
     if (ctx.config.demoAccessCode && accessCode !== ctx.config.demoAccessCode) return bad();
+    await resetCustomer(customerId);
     const sessionId = randomUUID();
     const token = signToken({ customerId, sessionId, exp: ctx.now() + TOKEN_TTL_MS }, ctx.config.sessionSecret);
     return { token, sessionId };

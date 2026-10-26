@@ -1,12 +1,8 @@
 import { rupees, type Paise, type ProductType, type RateType } from '@app/domain';
 import type { CustomerRecord, Interaction } from './types.js';
 
-export const DEMO_CUSTOMERS: { id: string; name: string; story: string }[] = [
-  { id: 'C1001', name: 'Rahul Mehta', story: 'Floating-rate home loan whose rate reset raised the EMI; asks why it went up.' },
-  { id: 'C1002', name: 'Priya Sharma', story: 'Personal loan with two failed debits; disputes a bounce charge levied on a bank technical failure.' },
-  { id: 'C1003', name: 'Arjun Verma', story: 'Personal loan two instalments overdue (40 days past due); collections conversation.' },
-  { id: 'C1004', name: 'Neha Kapoor', story: 'Two loans, all paid on time; saying "my EMI" is ambiguous and prepayment/foreclosure questions arise.' },
-];
+// The demo customer list lives in @app/shared so production code (the gateway) does not import the mocks.
+export { DEMO_CUSTOMERS } from '@app/shared';
 
 export const PROFILES: Omit<CustomerRecord, 'loanIds'>[] = [
   { customerId: 'C1001', name: 'Rahul Mehta', phone: '9820145567', email: 'rahul.mehta@example.in', pan: 'BKMPM4821Q', bankAccount: '50100234871965' },

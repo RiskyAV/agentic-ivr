@@ -53,6 +53,8 @@ This starts three processes:
 
 Pick a customer on the login screen. The OTP is always **`123456`**.
 
+Each login starts that customer fresh: their open requests in the mock systems (including a promise to pay), payment links and idempotency entries are cleared, and their cached backend data is dropped, so every journey can be re-run by the next reviewer. **Reset all** in the chaos panel resets everything, including chaos.
+
 | Customer | Story | Try |
 |---|---|---|
 | **Rahul Mehta** (C1001) | Floating home loan. A repo-linked reset took the rate from 8.50% to 9.10%, so the EMI rose. Prepayment is free. | "Why did my EMI go up?" → "Can I keep the old EMI instead?" → "What if I prepay ₹50,000 today?" → "Do the reduce-tenure one" → **Confirm** |

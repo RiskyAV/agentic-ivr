@@ -566,6 +566,51 @@ describe('voice over the gateway (fake vendors)', () => {
   });
 });
 
+describe('per-login demo reset', () => {
+  it('a login resets that customer\'s mock state and drops their cached connector data; other customers keep theirs', async () => {
+    const m = buildMockServer({ today: '2026-10-25', seed: 1, chaos: ZERO_CHAOS });
+    await m.listen({ port: 0, host: '127.0.0.1' });
+    const url = `http://127.0.0.1:${(m.server.address() as { port: number }).port}`;
+    try {
+      const app = await startApp(testConfig({ mockBaseUrl: url }));
+      const post = (customerId: string, key: string) => fetch(`${url}/ops/requests`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': key },
+        body: JSON.stringify({ customerId, type: 'promise_to_pay', params: { date: '2026-10-28' } }),
+      });
+      const list = async (customerId: string) => ((await (await fetch(`${url}/ops/requests?customerId=${customerId}`)).json()) as { requests: unknown[] }).requests;
+      await post('C1003', 'a');
+      await post('C1001', 'b');
+      // Prime the connector's stale-fallback cache with the old request list.
+      const callCtx = { signal: AbortSignal.timeout(2000) };
+      expect(await app.h.ctx.connectors.ops.list('C1003', callCtx)).toMatchObject({ ok: true, data: [expect.anything()] });
+      expect(await app.h.ctx.connectors.payments.list('PL-60917', {}, callCtx)).toMatchObject({ ok: true });
+
+      expect((await login('C1003', {}, app.base)).res.status).toBe(200);
+      expect(await list('C1003')).toEqual([]);
+      expect(await list('C1001')).toHaveLength(1);
+      // With ops down, the old (pre-reset) list must not be served as stale data.
+      await fetch(`${url}/admin/chaos`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ops: { failRate: 1 } }) });
+      expect(await app.h.ctx.connectors.ops.list('C1003', { signal: AbortSignal.timeout(5000) })).toMatchObject({ ok: false });
+      await fetch(`${url}/admin/chaos`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ payments: { failRate: 1 } }) });
+      expect(await app.h.ctx.connectors.payments.list('PL-60917', {}, { signal: AbortSignal.timeout(5000) })).toMatchObject({ ok: false });
+
+      // DEMO_RESET_ON_LOGIN=0 turns it off (load tests that log in many sessions of one customer).
+      await fetch(`${url}/admin/reset`, { method: 'POST' });
+      const off = await startApp(testConfig({ mockBaseUrl: url }, { DEMO_RESET_ON_LOGIN: '0' }));
+      await post('C1003', 'c');
+      expect((await login('C1003', {}, off.base)).res.status).toBe(200);
+      expect(await list('C1003')).toHaveLength(1);
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('a login still succeeds when the mock systems are unreachable', async () => {
+    const app = await startApp(testConfig({ mockBaseUrl: 'http://127.0.0.1:9' }));
+    expect((await login('C1001', {}, app.base)).res.status).toBe(200);
+  });
+});
+
 describe('voice limits (fake clock)', () => {
   const until = async (pred: () => boolean, ms = 3000) => {
     const end = Date.now() + ms;

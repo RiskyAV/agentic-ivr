@@ -1,5 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import { DEMO_CUSTOMERS } from '@app/mock-systems';
+import { DEMO_CUSTOMERS } from '@app/shared';
 import { ActionService } from './platform/actions/actionService.js';
 import { AuditLog } from './platform/actions/audit.js';
 import { buildConnectors } from './platform/connectors/clients.js';

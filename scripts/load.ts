@@ -146,6 +146,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         LLM_PROVIDER: 'stub', STUB_CHUNK_DELAY_MS: String(stubDelay), PORT: String(port), MOCK_PORT: String(mockPort), MOCK_BASE_URL: `http://127.0.0.1:${mockPort}`,
         LOGIN_RATE_PER_MIN: '1000000', TURN_RATE_PER_MIN: '1000000', LLM_MAX_CONCURRENCY: String(llmConcurrency), SESSION_SECRET: 'load-test-secret',
         EVENT_LOG_DIR: mkdtempSync(join(tmpdir(), 'load-events-')), GEMINI_API_KEY: '', DEMO_ACCESS_CODE: '',
+        // Hundreds of sessions share four customers: a per-login reset would only add mock traffic.
+        DEMO_RESET_ON_LOGIN: '0',
       };
       procs.push(child('apps/mock-systems/src/main.ts', env, 'mocks'));
       await sleep(1500);
