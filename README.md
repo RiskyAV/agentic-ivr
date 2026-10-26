@@ -70,7 +70,7 @@ Voice, in the brief's own example: press the mic and ask "What's my next EMI?". 
 
 | Command | What it does | Needs |
 |---|---|---|
-| `npm test` | 506 unit and integration tests (vitest) across all workspaces | nothing (the Gemini smoke test skips without a key) |
+| `npm test` | 523 unit and integration tests (vitest) across all workspaces | nothing (the paid Gemini smoke test runs only with `RUN_SMOKE=1` and a key) |
 | `npx tsc -b` | Type-check everything | nothing |
 | `npm run eval` | 28 golden accuracy cases and 15+2 red-team cases. Regenerates `docs/eval-report.md` | a running stack started with `TEST_HOOKS=1` (for the stale-data case), a Gemini key |
 | `npm run bench -- --runs 10 [--chaos payments:2500:0.3]` | Latency of the four journeys from the per-turn traces. Regenerates `docs/latency-report.md` | a running stack, a Gemini key |

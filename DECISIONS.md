@@ -393,3 +393,28 @@ Status: `Accepted` = agreed, `Proposed` = suggested but not yet confirmed, `Supe
 - **Why:** The hosted demo is reachable by anyone with the URL; chaos is a shared global switch, and test hooks are a backdoor by design.
 - **Rejected:** Bundling to JS with esbuild (ESM/`require` interop risk in fastify and the Gemini SDK for a small start-up saving); authenticating chaos GET and metrics (read-only, and the trace panel needs them).
 - **Trade-off:** tsx compiles on start (about a second) and keeps esbuild in the runtime image. Chaos stays global across sessions: one signed-in reviewer's chaos affects every session on the process.
+
+## D-053 — Guard short-circuit: rules before the LLM, an early classifier block aborts the turn
+- **Date:** 2026-10-26 · **Status:** Accepted
+- **Decision:** The guard's synchronous rules (`Guard.precheck`) run before the first LLM call. A rules block skips the LLM and the classifier entirely: no deltas, only the refusal (sent as a retract, then `done`). Otherwise the classifier still runs in parallel with the turn, but a `block` verdict that arrives mid-turn is recorded at once and aborts the LLM round and the tool waits through a dedicated abort signal; the turn then takes the existing retract path (held proposals cancelled, the user input withheld from history, strikes and escalation unchanged). In voice the retract closes the TTS socket immediately and sends `audio_flush` (not `barge_in`), so the UI does not label the refusal "interrupted". A guard timeout keeps D-043's behaviour (text stands, proposals dropped).
+- **Why:** With a 1.0-1.4 s classifier and a 2-6 s answer, a blocked answer used to be streamed (and spoken) to the end before it was withdrawn. Rules cost microseconds, so running them first costs nothing.
+- **Rejected:** A serial classifier before the LLM (+1.2 s on every turn, D-026).
+- **Trade-off:** A classifier block that lands mid-stream still shows (and may speak) the first part of the answer before the retract.
+
+## D-054 — Voice limits: idle and duration caps, one voice session per customer
+- **Date:** 2026-10-26 · **Status:** Accepted
+- **Decision:** The gateway stops a voice session after `VOICE_IDLE_MS` (default 120 s) without a committed transcript or assistant audio, and after `VOICE_MAX_MS` (default 15 min) in total; it checks every 5 s and sends `voice_stopped {reason}` (`idle`, `max_duration`, `replaced`). The browser tears voice down on that message (toast, text mode) and also stops voice itself when the tab becomes hidden. A `voice_start` for a customer who already has voice on another socket stops the older session first (one voice session per customer).
+- **Why:** Each voice session holds two vendor sockets and one of `MAX_VOICE_SESSIONS=5` process-wide slots; a forgotten tab would otherwise burn vendor minutes and lock other reviewers out.
+- **Trade-off:** A customer who listens silently for over two minutes without speaking or getting an answer is switched back to text.
+
+## D-055 — Per-login demo reset of the customer's mock state
+- **Date:** 2026-10-26 · **Status:** Accepted
+- **Decision:** `POST /api/login` calls the mock systems' `POST /admin/reset-customer {customerId}` (loopback-only admin route, no chaos), which deletes that customer's ops requests (including promises to pay), payment links and idempotency entries, and then drops the customer's connector caches (customer, loans, per-loan schedule and payments, requests). It is best effort (a failure never blocks the login) and `DEMO_RESET_ON_LOGIN=0` turns it off (the load test does). The demo customer list moved to `@app/shared`, so the gateway no longer imports the mocks package.
+- **Why:** The shared mocks made journeys single-use: one active promise to pay per customer, and requests piling up across reviewers.
+- **Trade-off:** Two reviewers on the same customer at the same time clear each other's requests; acceptable for a demo, and **Reset all** still resets everything.
+
+## D-056 — Event log never throws and is size-capped
+- **Date:** 2026-10-26 · **Status:** Accepted
+- **Decision:** `EventLog.append` catches its own failures (warns once, records `event_log_errors`), so a full or broken disk cannot fail a turn or a confirm's `action_result`. The directory is capped at 200 MB: past the cap the oldest session files (by modification time, never the one being written) are deleted down to 80%.
+- **Rejected:** An asynchronous buffered writer (the production path in the latency report); not needed at PoC volume.
+- **Trade-off:** Replay is impossible for sessions whose files were pruned or whose events were dropped.

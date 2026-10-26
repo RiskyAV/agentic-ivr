@@ -24,6 +24,9 @@ const p = (v: number[], q: number) => fmt(percentile(v, q));
 const pp = (v: number[]) => `${p(v, 0.5)} / ${p(v, 0.95)}`;
 const sec = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
 const pct = (x: number) => `${Math.round(x * 100)}%`;
+/** With fewer than 20 samples the nearest-rank p95 is simply the slowest sample; say so. */
+const p95Label = (n: number) => (n < 20 ? `p95 (max of ${n} runs)` : 'p95');
+const p95Word = (n: number) => (n < 20 ? `max of ${n} runs` : 'p95');
 
 function benchSection(title: string, f: BenchFile, extra = ''): string {
   const cmd = `npm run bench -- --runs ${f.runs}${f.chaosSpec ? ` --chaos ${f.chaosSpec}` : ''}`;
@@ -54,16 +57,16 @@ function timeGoes(d: BenchFile, c: BenchFile | undefined, h: BenchFile | undefin
     : '';
   L.push(`- **Hedging did not fire in any run (honest finding).** Completed hedged attempts: ${s.hedged} of ${s.backendCalls} calls by default and ${c ? `${c.samples.hedged} of ${c.samples.backendCalls}` : 'n/a'} under chaos. Two mechanisms explain it. (1) A hedge starts only for a GET while the circuit breaker is closed, after the rolling p95 of recent successes, within a 10% budget, and never on a half-open trial. Under \`${c?.chaosSpec ?? 'chaos'}\` every payments call exceeds the 1.5 s call timeout, the consecutive-failure count reaches 5 inside the first logical call (3 attempts, each possibly with a hedge), the breaker opens for 10 s, and from then on payments calls are short-circuited or half-open trials. (2) A hedge that loses the race is cancelled before it reports, so this counter only sees hedges that completed, which understates launches.${hedgeNote} Hedging helps against occasional slow outliers on an otherwise fast backend, which these profiles do not produce; the breaker, retries and stale fallback are what handled the outage here.`);
   if (v) {
-    L.push(`- **Voice.** End of speech to final transcript p50 ${p(v.stt, 0.5)} ms; LLM first token p50 ${p(v.llm, 0.5)} ms (p95 ${p(v.llm, 0.95)}); first audio at the test client p50 ${p(v.firstAudioClient, 0.5)} ms, p95 ${p(v.firstAudioClient, 0.95)} ms (${v.runs} runs). The STT silence window and vendor commit set the first term; the LLM first token and the first TTS sentence the rest.`);
+    L.push(`- **Voice.** End of speech to final transcript p50 ${p(v.stt, 0.5)} ms; LLM first token p50 ${p(v.llm, 0.5)} ms (${p95Word(v.runs)} ${p(v.llm, 0.95)}); first audio at the test client p50 ${p(v.firstAudioClient, 0.5)} ms, ${p95Word(v.runs)} ${p(v.firstAudioClient, 0.95)} ms. The STT silence window and vendor commit set the first term; the LLM first token and the first TTS sentence the rest.`);
   }
   return L.join('\n');
 }
 
-function voiceSection(v: VoiceFile): string {
+export function voiceSection(v: VoiceFile): string {
   const row = (name: string, a: number[]) => `| ${name} | ${a.length} | ${p(a, 0.5)} | ${p(a, 0.95)} |`;
   return [
     `\`npx tsx scripts/voice-smoke.ts\` run ${v.runs} times (real Gemini, real ElevenLabs STT and TTS, in-process mocks; macOS \`say\` fixtures of "What's my next EMI?" and "Actually, check my last payment first."). Scenario 1 gives the first five rows; the barge-in row comes from scenario 2. The "test client" row is the end-of-speech to first audio frame as the WebSocket client sees it; browser playback adds the audio output buffer on top, and no browser end-to-end figure is repeated here.`, '',
-    '| Stage | n | p50 | p95 |\n|---|---|---|---|',
+    `| Stage | n | p50 | ${p95Label(v.runs)} |\n|---|---|---|---|`,
     row('STT commit (end of speech to final transcript)', v.stt),
     row('LLM first token (engine, after turn start)', v.llm),
     row('First TTS audio, server (commit to first audio frame sent)', v.firstAudioServer),

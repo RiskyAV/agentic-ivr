@@ -15,7 +15,7 @@
 4. In **Chaos controls**, set Payments to fail at 100%. Log in as **Priya Sharma** and ask *"Show my failed payments"*. There are two honest outcomes, never an invented answer: "I can't check that right now", or, if her payments were fetched earlier in the same session, that earlier data clearly labelled as not live with its age. Reset with **Reset all** (or `POST /api/chaos/reset`).
 5. Switch the header to **Collections call** as **Arjun Verma**. The agent opens the call, states the overdue amount, and records a promise to pay.
 6. Press the mic. Ask *"What's my next EMI?"*, interrupt it with *"actually, check my last payment first"*, then ask *"would paying ₹20,000 extra reduce my tenure?"*
-7. `npm test` (506 tests, no keys needed). With keys and a running stack, `npm run eval` regenerates [eval-report.md](eval-report.md).
+7. `npm test` (523 tests, no keys needed; the paid smoke test runs only with `RUN_SMOKE=1`). With keys and a running stack, `npm run eval` regenerates [eval-report.md](eval-report.md).
 
 ---
 
@@ -112,8 +112,9 @@ sequenceDiagram
   S-->>V: partial transcripts (live caption only)
   S-->>V: committed transcript (VAD silence 0.45 s)
   V->>E: runTurn(transcript, channel=voice)
-  par guard runs in parallel
-    E->>G: rules (0 ms) then classifier (~1.2 s)
+  E->>G: rules (0 ms), a block ends the turn here with no LLM call
+  par classifier runs in parallel
+    E->>G: classifier (~1.2 s), a block aborts the answer at once
   and answer
     E->>L: round 0 (snapshot in prompt, tool declarations)
     L-->>E: tool calls
@@ -145,7 +146,7 @@ The engine starts **only on the committed transcript**. Speculative starts on pa
 
 ## 5. Key decisions
 
-The full log, with dates and trade-offs, is [`DECISIONS.md`](../DECISIONS.md) (D-001 to D-052). The most consequential decisions:
+The full log, with dates and trade-offs, is [`DECISIONS.md`](../DECISIONS.md) (D-001 to D-056). The most consequential decisions:
 
 | Decision | Chosen | Rejected, and why |
 |---|---|---|
@@ -183,9 +184,9 @@ Headline numbers, from [latency-report.md](latency-report.md) (`npm run bench --
 | Text turn, server `turn_total` | 3947 ms | 6730 ms |
 | Turn under chaos (`payments:2500:0.3`) | 3615 ms | 5687 ms |
 | Guard verdict (parallel, off the critical path) | 1163 ms | 1408 ms |
-| Voice: end of speech → final transcript | 1041 ms | 1122 ms |
-| Voice: end of speech → first audio at the client | 3336 ms | 3838 ms |
-| Voice: barge-in (interruption → `barge_in`) | 1258 ms | 1278 ms |
+| Voice: end of speech → final transcript | 1041 ms | 1122 ms (max of 5 runs) |
+| Voice: end of speech → first audio at the client | 3336 ms | 3838 ms (max of 5 runs) |
+| Voice: barge-in (interruption → `barge_in`) | 1258 ms | 1278 ms (max of 5 runs) |
 
 **Where the time goes.** In the median turn, LLM rounds account for 71% of the server time and tools for 29%. A tool turn needs two model rounds, and each round costs about 1.3 s before its first token. The slowest tools are `propose_promise_to_pay` and `get_payment_history`, because they fan out to payments and ops, whose backend p50 is 627 ms and 763 ms. In voice:
 
@@ -218,7 +219,7 @@ Voice misses the spec's "under 1 s for no-tool turns" goal by about 2 s. That is
 - **Chaos results.** Payments was set to fail 30% of calls and to add 2.5 s to the rest. Over 70 turns: p95 5687 ms, max 6135 ms, 0 turns degraded. The breaker short-circuited 21 payments calls. The journeys that need payments honestly did not reach their proposal: J3 reached it in 6 of 10 runs and J4 in 0 of 10.
 - **Honest finding on hedging.** Hedging fired 1 time in 318 calls. Under a uniform slowdown the rolling p95 moves too, and under failures the breaker opens first. Hedging helps occasional outliers, which these profiles did not produce.
 - **Resume.** A reconnect within 5 minutes resumes the same session and history. A double confirm returns the original reference and does not execute twice (D-040, D-045).
-- **Replay (D-023).** Every turn is event-logged: backend responses, LLM output and guard verdicts. `npm run replay -- <sessionId>` reproduces a recorded session exactly (3 of 3 turns identical), or re-runs it with the live model against the recorded backends.
+- **Replay (D-023).** Every turn is event-logged: backend responses, LLM output and guard verdicts. `npm run replay -- <sessionId>` reproduces a recorded session exactly (3 of 3 turns identical), or re-runs it with the live model against the recorded backends. "Exactly" holds for sessions without failed or timed-out backend calls and without guard timeouts: retries, breaker and timeout paths depend on wall-clock timing, which the log does not capture, so such turns can replay differently.
 
 ## 9. Security
 
@@ -228,7 +229,7 @@ Voice misses the spec's "under 1 s for no-tool turns" goal by about 2 s. That is
 | Actions (D-021, D-040) | The model only has `propose_*` tools. Execution happens only through `ActionService.confirm(proposalId, termsHash)`: the app's button, or a deterministic spoken "yes". Terms are revalidated at execution. Actions are idempotent and audited. |
 | Voice consent | Spoken consent is armed only after the read-back of exactly one pending proposal has **played** to the end without barge-in. A "yes" that started earlier gets a re-read. An echo guard drops the assistant's own words. The affirmation set is fixed ("yes", "go ahead", "haan ji"), with no LLM in the loop. Barge-in never touches a proposal (D-048). |
 | Data minimisation (D-022) | PAN, phone, email and account numbers are masked (`XXXXXX1234`) before prompts, logs and traces. |
-| Malicious input (D-026, D-043) | Rule check plus a classifier, running in parallel with the turn. Proposals are held until the guard allows. A blocked turn is retracted and refused, with escalation from the second strike. Backend free text is wrapped as untrusted. |
+| Malicious input (D-026, D-043, D-053) | The rule check runs before the LLM: a rules block skips the model and sends only the refusal. The classifier runs in parallel with the turn; a block that arrives mid-answer aborts the stream at once (and cuts the voice audio). Proposals are held until the guard allows. A blocked turn is retracted and refused, with escalation from the second strike. Backend free text is wrapped as untrusted. |
 | Red team | 15/15 on every run: injection, impersonation, cross-customer access, fee-waiver coercion, prompt extraction, malicious dispute text and abuse. 2/2 crafted "confirm proposal PRP-…" messages executed nothing. |
 | Hosted demo (D-052) | `DEMO_ACCESS_CODE` gates login and chaos changes. `TEST_HOOKS` is refused in production. The API binds to loopback behind nginx. Secrets live only on the server; the browser never talks to Gemini or ElevenLabs. The CI deploy holds no cloud credentials: an SSH key restricted to a forced command can only upload a release and run one root-owned activation script (verify, install as the app user, swap, health-check, roll back). See `deploy/SETUP.md`. |
 
@@ -245,7 +246,7 @@ A workflow is a `WorkflowDefinition` (`platform/workflows/types.ts`) made of a s
 | `workflows/collections/` (definition, prompt, `get_overdue_summary`, `promise_to_pay` and `payment_link` actions, a penal-charge helper) | 5 | 254 |
 | its tests | 1 | 153 |
 | `workflows/shared/requests.ts` (request helpers moved out of loan-servicing) | 1 | 34 (moved, not new) |
-| Registration in `app.ts` | 1 | +6 / −2 |
+| Registration in `app.ts` | 1 | +7 / −3 |
 | **`apps/server/src/platform/`** | **0** | **0** |
 
 The UI needed one change: payment links became clickable. The workflow switcher, action cards, trace and voice worked unchanged. Collections also gets voice, chaos tolerance, the guard and eval coverage (G17–G22) for free.
