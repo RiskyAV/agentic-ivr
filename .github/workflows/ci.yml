@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+# Read-only by default; no job here needs secrets or a writable token.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Type-check and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Deterministic: the stub LLM and fake voice vendors. Paid-API smoke tests skip without keys.
+      LLM_PROVIDER: stub
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npx tsc -b
+      - run: npm test
+
+  secret-scan:
+    name: Secret scan (gitleaks, full history)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # The gitleaks binary via its official image: no license key, no GitHub token needed.
+      - name: gitleaks git
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git /repo --redact --verbose --exit-code 1

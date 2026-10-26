@@ -1,0 +1,86 @@
+name: Deploy
+
+# Production deploys only from main in the canonical repo. Never triggered by pull requests.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  api:
+    name: API to the VM
+    needs: ci
+    if: github.repository == 'RiskyAV/agentic-ivr' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GCP_USE_IAP: ${{ vars.GCP_USE_IAP || '0' }}
+      API_BASE: ${{ vars.API_BASE || 'https://api.sparsan.com' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      # Workload Identity Federation: short-lived credentials, no JSON keys.
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Deploy API (type-check, release upload, npm ci --omit=dev, units, nginx, restart)
+        run: scripts/deploy.sh api
+      - name: Public health check
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsS --max-time 5 "$API_BASE/api/health"; then echo; echo "healthy"; exit 0; fi
+            echo "attempt $i: not healthy yet"; sleep 6
+          done
+          echo "::error::$API_BASE/api/health did not become healthy"; exit 1
+
+  web:
+    name: Web to Cloudflare Pages
+    needs: [ci, api]
+    if: github.repository == 'RiskyAV/agentic-ivr' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    permissions:
+      contents: read
+    env:
+      API_BASE: ${{ vars.API_BASE || 'https://api.sparsan.com' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Build web
+        run: scripts/deploy.sh web-build
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy apps/web/dist --project-name loan-poc --branch main
