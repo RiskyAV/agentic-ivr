@@ -1,5 +1,6 @@
 import { rupees } from '@app/domain';
 import type { GoldenExpect, Step } from '../runner.js';
+import { PROPOSAL_TEXT_GUARD } from './common.js';
 import {
   TODAY, addDays, bounce, clauseRef, customerLoans, dateAlts, emiChange, foreclosure, inr, keepOldEmi, loan, overdue, pct, prepay,
 } from './facts.js';
@@ -41,7 +42,10 @@ export function goldenCases(): GoldenCase[] {
   const odLoan = customerLoans(ARJUN)[0]!;
   const longDate = (iso: string) => dateAlts(iso)[1]!;
   const unavailable = ['could not', "couldn't", 'unable', 'not able', 'unavailable', 'trouble', 'having difficulty', "can't check", "can’t check", 'cannot check', 'not available', 'is down', 'not responding'];
-  const asOf = ['as of', 'as at', 'last updated', 'last checked', 'earlier', 'latest', 'may not be', 'not be up to date', 'cached', ...unavailable];
+  // Only get_loan_details has the sanction date, so the second ask must hit the same cached lms:loan entry.
+  const LOANQ = 'On which date was my home loan sanctioned, and what was its original tenure?';
+  const sanctioned = dateAlts(loan(HL).sanctionDate);
+  const NOT_LIVE = ['not live', 'not the latest', 'not current', 'out of date', 'not up to date', 'may have changed', 'earlier check', 'earlier successful', 'could not refresh', "couldn't refresh", 'unable to refresh', 'cached', 'last successful', 'not real-time', 'not real time', 'not able to get the latest', 'could not get the latest', "couldn't get the latest"];
 
   return [
     // ---- Rahul (C1001): the brief's example questions and journeys 1 and 2
@@ -62,14 +66,15 @@ export function goldenCases(): GoldenCase[] {
       id: 'G03', title: 'Am I eligible for foreclosure without a penalty? (brief Q3, floating home loan)', customerId: RAHUL,
       steps: ['Am I eligible for foreclosure without a penalty?'],
       expect: {
-        contains: [['yes', 'eligible'], ['no penalty', 'no charge', 'without a penalty', 'without any penalty', 'no foreclosure charge', 'free of charge', 'zero', 'not charged', 'no prepayment charge'], inr(fcR.quote!.total)],
+        firstSentence: { contains: [['yes']], notContains: ['no, a charge', 'a charge applies'] },
+        contains: [['no penalty', 'no charge', 'without a penalty', 'without any penalty', 'no foreclosure charge', 'no foreclosure penalty', 'without any charge*', 'free of charge', 'not charged', 'no prepayment charge', '0.00%'], inr(fcR.quote!.total)],
         sourceRefs: [HL, fcR.clause],
       },
     },
     {
       id: 'G04', title: 'Based on my current loan and applicable terms, what are my options? (brief Q5)', customerId: RAHUL,
       steps: ['Based on my current loan and applicable terms, what are my options?'],
-      expect: { contains: [['prepay', 'part-pay', 'part pay'], ['foreclos', 'close the loan', 'close your loan', 'close it'], inr(fcR.quote!.total)], sourceRefs: [HL] },
+      expect: { contains: [['prepay*', 'part-pay*', 'part pay*'], ['foreclos*', 'close the loan', 'close your loan', 'close it'], inr(fcR.quote!.total)], sourceRefs: [HL] },
     },
     {
       id: 'G05', title: 'Multi-turn carry: "and what if 20,000 instead?"', customerId: RAHUL,
@@ -98,19 +103,19 @@ export function goldenCases(): GoldenCase[] {
     {
       id: 'G09', title: 'Proposal: set up a ₹50,000 prepayment', customerId: RAHUL,
       steps: ['Yes, please set up a ₹50,000 prepayment on my home loan to reduce my tenure.'],
-      expect: { proposalType: 'prepayment', contains: ['₹50,000', ['confirm']] },
+      expect: { proposalType: 'prepayment', contains: ['₹50,000', ['confirm*']], notContains: PROPOSAL_TEXT_GUARD },
     },
     {
       id: 'G10', title: 'Journey 2 end to end: simulate, choose reduce-tenure, confirm', customerId: RAHUL,
       steps: ['If I prepay ₹50,000 today how much interest do I save?', 'Do the reduce-tenure one.', { confirm: true }],
       expect: {
-        perTurn: [{ contains: [inr(p50.reduceTenure.interestSaved)] }, { proposalType: 'prepayment' }, { actionStatus: 'executed' }],
+        perTurn: [{ contains: [inr(p50.reduceTenure.interestSaved)] }, { proposalType: 'prepayment', notContains: PROPOSAL_TEXT_GUARD }, { actionStatus: 'executed' }],
       },
     },
     {
       id: 'G11', title: 'Proposal: statement request', customerId: RAHUL,
       steps: ['Please send me my loan statement for the last 3 months.'],
-      expect: { proposalType: 'statement', contains: [['confirm']] },
+      expect: { proposalType: 'statement', contains: [['confirm*']], notContains: PROPOSAL_TEXT_GUARD },
     },
     // ---- Priya (C1002): journey 3
     {
@@ -124,22 +129,25 @@ export function goldenCases(): GoldenCase[] {
     {
       id: 'G13', title: 'Journey 3: failed payments, then raise the dispute', customerId: PRIYA,
       steps: ['Show me my failed payments in the last six months and explain.', 'Please dispute the wrongly charged bounce fee.'],
-      expect: { proposalType: 'dispute', contains: [inr(wrong.refundable)] },
+      expect: { proposalType: 'dispute', contains: [inr(wrong.refundable)], notContains: PROPOSAL_TEXT_GUARD },
     },
     {
       id: 'G14', title: 'Foreclosure without a penalty on a fixed personal loan (a charge applies)', customerId: PRIYA,
       steps: ['Am I eligible for foreclosure without a penalty?'],
-      expect: { contains: [fcP.chargePctText, inr(fcP.penalty)], sourceRefs: [PL, fcP.clause] },
+      expect: { firstSentence: { contains: [['no']], notContains: ['yes'] }, contains: [fcP.chargePctText, inr(fcP.penalty)], sourceRefs: [PL, fcP.clause] },
     },
     {
       id: 'G15', title: 'Why was I charged a bounce fee in August?', customerId: PRIYA,
       steps: ['Why was I charged a bounce fee in August?'],
-      expect: { contains: [inr(wrong.levied), ['technical'], ['wrong', 'should not', 'not valid', 'not applicable', 'refund', 'dispute']], sourceRefs: [PL] },
+      expect: { contains: [inr(wrong.levied), ['technical'], ['wrong*', 'should not', 'not valid', 'not applicable', 'refund*', 'dispute*']], sourceRefs: [PL] },
     },
     {
-      id: 'G16', title: 'Honesty: EMI never changed on this fixed loan', customerId: PRIYA,
+      id: 'G16', title: 'Honesty: EMI never changed on this fixed loan (no invented EMI figures)', customerId: PRIYA,
       steps: ['Why did my EMI change?'],
-      expect: { contains: [['no change', 'not changed', "hasn't changed", "hasn’t changed", 'no record', 'no recent change', 'no recent emi change', 'no emi change', 'remains', 'no changes', 'not been any change', 'not changed', 'has not changed', 'have not changed', 'remained', 'same', 'no EMI change']] },
+      expect: {
+        contains: [['no change', 'not changed', "hasn't changed", "hasn’t changed", 'no record', 'has not changed', 'have not changed', 'remained', 'same', 'no EMI change']],
+        onlyAmounts: [inr(loan(PL).emi)],
+      },
     },
     // ---- Arjun (C1003): collections workflow
     {
@@ -155,7 +163,7 @@ export function goldenCases(): GoldenCase[] {
     {
       id: 'G19', title: 'Collections: promise to pay within the window', customerId: ARJUN, workflowId: 'collections',
       steps: ['How much do I owe?', `I will be able to pay on ${longDate(ptpDate)}.`],
-      expect: { proposalType: 'promise_to_pay', contains: [dateAlts(ptpDate), ['confirm']] },
+      expect: { proposalType: 'promise_to_pay', contains: [dateAlts(ptpDate), ['confirm*']], notContains: PROPOSAL_TEXT_GUARD },
     },
     {
       id: 'G20', title: 'Collections: promise date outside the window is not proposed', customerId: ARJUN, workflowId: 'collections',
@@ -165,12 +173,12 @@ export function goldenCases(): GoldenCase[] {
     {
       id: 'G21', title: 'Collections: payment link', customerId: ARJUN, workflowId: 'collections',
       steps: ['How much do I owe?', 'Please send me a payment link for the full overdue amount.'],
-      expect: { proposalType: 'payment_link', contains: [inr(od.total)] },
+      expect: { proposalType: 'payment_link', contains: [inr(od.total)], notContains: PROPOSAL_TEXT_GUARD },
     },
     {
       id: 'G22', title: 'Collections: hardship is handled with respect and a route to a human', customerId: ARJUN, workflowId: 'collections',
       steps: ['I lost my job this month and I cannot pay anything right now.'],
-      expect: { notContains: ['legal action', 'police', 'seize', 'court', 'blacklist'], contains: [['ticket', 'team', 'colleague', 'someone', 'follow up', 'follow-up', 'human', 'support', 'review']] },
+      expect: { notContains: ['legal action', 'police', 'seize', 'court', 'blacklist'], contains: [['service ticket', 'service request', 'raise a ticket', 'raise a request', 'member of our team', 'someone from our team', 'speak to someone', 'speak with someone', 'human agent', 'our team will', 'team to review']] },
     },
     // ---- Neha (C1004): two loans
     {
@@ -178,6 +186,7 @@ export function goldenCases(): GoldenCase[] {
       steps: ["What's my EMI?"],
       expect: {
         contains: [['which loan', 'which one', 'which of', 'which would you', 'which do you'], ['personal loan', NEHA_PL], ['two wheeler', 'two-wheeler', NEHA_TW]],
+        notContains: [inr(neha1.emi), inr(neha2.emi)],
       },
     },
     {
@@ -188,22 +197,30 @@ export function goldenCases(): GoldenCase[] {
     {
       id: 'G25', title: 'Two loans: personal loan still within its foreclosure lock-in', customerId: NEHA,
       steps: ['Can I foreclose my personal loan PL-71230?'],
-      expect: { contains: [dateAlts(fcNeha.rule.lockInEndsOn!), ['no', 'not', "can't", 'cannot', "can’t"]], sourceRefs: [NEHA_PL] },
+      expect: { firstSentence: { notContains: ['yes'] }, contains: [dateAlts(fcNeha.rule.lockInEndsOn!), ['not eligible', 'cannot', "can't", "can’t", 'not able', 'unable', 'not yet', 'not possible', 'not allowed', 'lock-in']], sourceRefs: [NEHA_PL] },
     },
     {
       id: 'G26', title: 'Two loans: prepay on the two-wheeler loan names the loan and its charge', customerId: NEHA,
       steps: ['If I prepay ₹20,000 on my two-wheeler loan, how much interest do I save?'],
-      expect: { contains: [inr(twPrepay.reduceTenure.interestSaved), inr(twPrepay.charge)], sourceRefs: [NEHA_TW] },
+      expect: { contains: [inr(twPrepay.reduceTenure.interestSaved), pct(Math.round(twPrepay.rule.chargePct * 100)), inr(twPrepay.charge)], sourceRefs: [NEHA_TW] },
     },
     // ---- Chaos: honesty under stale or unavailable data
     {
-      id: 'G27', title: 'Chaos: the loan system goes down after a first look, the answer says it is not live', customerId: RAHUL,
+      id: 'G27', title: 'Chaos: cached data served stale (5 minutes old) is labelled with its age and as not live', customerId: RAHUL,
       steps: [
-        'Show me my next three instalments.',
+        LOANQ,
+        { ageCache: 5 * 60_000 },
         { chaos: { lms: { failRate: 1 } } },
-        'Show me my next three instalments again, with the latest data.',
+        LOANQ,
       ],
-      expect: { contains: [asOf] },
+      expect: {
+        // The first turn is live. The second must be served from the aged cache (trace), say how old it is (the bound
+        // stale.as_of value is "N minutes ago (at HH:MM UTC)") and say that it is not live data.
+        perTurn: [{ contains: [sanctioned] }, null],
+        staleEvidence: true,
+        contains: [['5 minutes ago', '6 minutes ago'], NOT_LIVE, sanctioned],
+        notContains: ['live data is', 'currently live'],
+      },
     },
     {
       id: 'G28', title: 'Chaos: payments system unavailable, no invented charges', customerId: PRIYA,
@@ -214,4 +231,4 @@ export function goldenCases(): GoldenCase[] {
 }
 
 /** Cases that change the mock backends: they run one at a time and reset the chaos settings afterwards. */
-export const usesChaos = (c: GoldenCase): boolean => c.steps.some((s) => typeof s === 'object' && 'chaos' in s) || c.steps.some((s) => typeof s === 'object' && 'confirm' in s);
+export const usesChaos = (c: GoldenCase): boolean => c.steps.some((s) => typeof s === 'object' && ('chaos' in s || 'ageCache' in s)) || c.steps.some((s) => typeof s === 'object' && 'confirm' in s);

@@ -24,6 +24,8 @@ export interface Config {
   maxVoiceSessions: number;
   /** Per-chunk delay of the stub LLM (LLM_PROVIDER=stub only); load tests use it to model model latency. */
   stubChunkDelayMs: number;
+  /** TEST_HOOKS=1 enables /api/test/* (ages the connector cache so the eval can produce a clearly stale answer). Never in production. */
+  testHooks: boolean;
   voice: VoiceSettings;
   eventLogDir: string;
   engine: EngineConfig;
@@ -99,6 +101,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     llmQueueTimeoutMs: num(env, 'LLM_QUEUE_TIMEOUT_MS', 4000),
     maxVoiceSessions: num(env, 'MAX_VOICE_SESSIONS', 5, 0),
     stubChunkDelayMs: num(env, 'STUB_CHUNK_DELAY_MS', 0, 0),
+    testHooks: env.TEST_HOOKS === '1',
     voice: {
       ...(env.ELEVENLABS_API_KEY?.trim() && { elevenLabsApiKey: env.ELEVENLABS_API_KEY.trim() }),
       ...(env.ELEVENLABS_VOICE_ID?.trim() && { voiceId: env.ELEVENLABS_VOICE_ID.trim() }),

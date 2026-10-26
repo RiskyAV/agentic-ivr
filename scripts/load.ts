@@ -14,44 +14,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ServerMsg } from '@app/shared';
 import { arg, login, openSocket, percentile } from './eval/runner.js';
-import { upsertSection, readSection } from './docSections.js';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { writeLatencyReport } from './latencyReport.js';
+import { type LoadResult, type MetricsReply } from './loadStats.js';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const CUSTOMERS = ['C1001', 'C1002', 'C1003', 'C1004'];
 const PROMPTS = ['Why did my EMI go up?', "What's my EMI now?", 'Tell me about my EMI change', 'Explain my EMI again', 'Has my EMI changed?'];
-
-interface MetricsReply {
-  metrics: Record<string, { p50: number; p95: number; n: number }>;
-  eventLoopLagP99: number;
-  rssMb: number;
-  sessions: number;
-  limiter: { active: number; queued: number };
-}
-
-export interface LoadResult {
-  sessions: number;
-  turns: number;
-  connected: number;
-  completedTurns: number;
-  failedTurns: number;
-  highDemand: number;
-  clientMs: number[];
-  serverMs: number[];
-  peakQueued: number;
-  peakActive: number;
-  lagMax: number;
-  lagLast: number;
-  rssBase: number;
-  rssConnected: number;
-  rssPeak: number;
-  wallSec: number;
-  stubDelay: number;
-  llmConcurrency: number;
-  idealTurnMs: number;
-  serverMetrics: MetricsReply['metrics'];
-  errors: string[];
-}
 
 function child(file: string, env: NodeJS.ProcessEnv, log: string): ChildProcess {
   const p = spawn(process.execPath, ['--import', 'tsx', join(ROOT, file)], { cwd: ROOT, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -157,26 +127,6 @@ export async function runLoad(base: string, o: { sessions: number; turns: number
   return res;
 }
 
-const f = (n: number) => (Number.isFinite(n) ? String(Math.round(n)) : 'n/a');
-
-export function renderLoad(r: LoadResult, label: string): string {
-  const c = r.clientMs;
-  const s = r.serverMs;
-  const perSession = r.connected > 0 ? (r.rssConnected - r.rssBase) / r.connected : NaN;
-  const llmFirst = r.serverMetrics.llm_first_token;
-  return [
-    `**${label}**`, '',
-    `- Setup: ${r.sessions} sessions x ${r.turns} turns over WebSocket, stub LLM with ${r.stubDelay} ms per chunk-step (an ideal turn is about ${r.idealTurnMs} ms: three chunk-steps), LLM concurrency limit ${r.llmConcurrency}, think time 0 to 2x the configured mean between turns. ${r.connected}/${r.sessions} sessions connected.`,
-    `- Turns: ${r.completedTurns} completed, ${r.failedTurns} failed, ${r.highDemand} answered with the "very high demand" message (limiter queue timeout). Wall time ${r.wallSec.toFixed(1)} s.`,
-    `- Turn latency, client send to answer: p50 ${f(percentile(c, 0.5))} ms, p95 ${f(percentile(c, 0.95))} ms, max ${f(c.length ? Math.max(...c) : NaN)} ms. Server turn_total: p50 ${f(percentile(s, 0.5))} ms, p95 ${f(percentile(s, 0.95))} ms.`,
-    `- llm_first_token (includes limiter wait): p50 ${f(llmFirst?.p50 ?? NaN)} ms, p95 ${f(llmFirst?.p95 ?? NaN)} ms.`,
-    `- Limiter: peak active ${r.peakActive}, peak queued ${r.peakQueued}.`,
-    `- Event-loop lag p99 (cumulative histogram of the server process): peak ${r.lagMax.toFixed(1)} ms, at the end ${r.lagLast.toFixed(1)} ms.`,
-    `- Server RSS: ${r.rssBase} MB idle, ${r.rssConnected} MB with all sessions connected (${f(perSession * 1024)} KB per idle session), ${r.rssPeak} MB peak under load.`,
-    ...(r.errors.length ? [`- Errors: ${[...new Set(r.errors)].slice(0, 5).join('; ')} (${r.errors.length} total)`] : []),
-  ].join('\n');
-}
-
 if (import.meta.url === `file://${process.argv[1]}`) {
   const sessions = Number(arg('sessions', '200'));
   const turns = Number(arg('turns', '5'));
@@ -204,15 +154,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     await waitHealthy(base);
     const r = await runLoad(base, { sessions, turns, thinkMs, rampMs, stubDelay, llmConcurrency });
     const label = arg('label', `${sessions} sessions, LLM concurrency ${llmConcurrency}`)!;
-    const block = renderLoad(r, label);
-    console.log(block);
+    mkdirSync(join(ROOT, '.data/bench'), { recursive: true });
     if (arg('no-write') !== 'true') {
-      const prev = readSection('Concurrency') ?? '';
-      const intro = 'Run with `npm run load -- --sessions N --turns 5`: the server (stub LLM, real gateway, engine, guard rules, connectors and mock systems) and the load generator run on the same Mac, so the generator competes for CPU; treat the numbers as a floor for server overhead.\n\n';
-      const blocks = prev.startsWith('Run with') ? prev.split('\n\n').slice(1).join('\n\n') : prev;
-      const kept = blocks.split(/\n\n(?=\*\*)/).filter((b) => b.trim() && !b.startsWith(`**${label}**`));
-      upsertSection('Concurrency', intro + [...kept, block].join('\n\n'));
+      writeFileSync(join(ROOT, `.data/bench/load-${sessions}-${llmConcurrency}.json`), JSON.stringify({ label, result: r }));
+      console.log(`report: ${writeLatencyReport()}`);
     }
+    console.log(JSON.stringify({ label, ...r, clientMs: undefined, serverMs: undefined }));
   } finally {
     for (const p of procs.reverse()) p.kill('SIGINT');
     await sleep(500);

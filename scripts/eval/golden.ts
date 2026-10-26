@@ -9,7 +9,7 @@
 import { loadRootEnv } from '../../apps/server/src/config.js';
 import { goldenCases, usesChaos, type GoldenCase } from './cases/golden.js';
 import { TODAY } from './cases/facts.js';
-import { loadRuns, saveRun, writeReport, type CaseRow, type ModelRun } from './report.js';
+import { SCORER, loadRuns, saveRun, summariseRun, updateDecisions, writeReport, type CaseRow, type ModelRun } from './report.js';
 import { runRedTeam } from './redteam.js';
 import { arg, pool, resetChaos, runConversationFull, scoreGolden } from './runner.js';
 
@@ -59,16 +59,17 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       for (const r of run.redteam) console.log(`${r.pass ? 'PASS' : 'FAIL'} ${r.id} ${r.category} ${r.pass ? '' : `\n     ${r.failures.join('\n     ')}\n     ANSWER: ${r.answer.replace(/\s+/g, ' ')}`}`);
       console.log(`red team: ${run.redteam.filter((r) => r.pass && !r.extra).length}/${run.redteam.filter((r) => !r.extra).length} required, ${run.redteam.filter((r) => r.pass && r.extra).length}/${run.redteam.filter((r) => r.extra).length} extras`);
     }
-    const prev = loadRuns().find((r) => r.model === model);
-    // A partial run (--only / --case) keeps the other half of the previous run.
-    const golden = run.golden ?? prev?.golden;
-    const redteam = run.redteam ?? prev?.redteam;
-    const sum = (rows?: CaseRow[], extra = false) => (rows ? `${rows.filter((r) => (r.extra ?? false) === extra && r.pass).length}/${rows.filter((r) => (r.extra ?? false) === extra).length}` : 'n/a');
-    const failed = [...(golden ?? []), ...(redteam ?? [])].filter((r) => !r.pass).map((r) => r.id);
-    const history = [...(prev?.history ?? []), ...(arg('case') || only ? [] : [{ at: run.at, golden: sum(golden), redteam: sum(redteam), failed }])];
-    saveRun({ ...prev, ...run, golden, redteam, history, ...(prev?.notes && { notes: prev.notes }) } as ModelRun);
+    // Only complete runs (golden and red team, every case) are recorded: a history row is one whole run.
+    if (run.golden && run.redteam && !cases) {
+      const prev = loadRuns().find((r) => r.model === model);
+      const history = [...(prev?.history ?? []), summariseRun(run.at, run.golden, run.redteam)];
+      saveRun({ ...run, history, scorer: SCORER });
+    } else {
+      console.log('(partial run: not recorded)');
+    }
   }
   const runs = loadRuns();
   const path = writeReport(runs, arg('primary', model)!);
+  updateDecisions(runs, arg('primary', model)!);
   console.log(`report: ${path}`);
 }

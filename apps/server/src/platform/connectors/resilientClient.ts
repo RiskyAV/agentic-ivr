@@ -98,6 +98,11 @@ export class ResilientClient {
     return this.call<T>('POST', path, body, ctx, ctx.idempotencyKey);
   }
 
+  /** Test hook: makes every cached fallback entry look `ms` older (so a stale answer has a clearly past as-of time). */
+  ageCache(ms: number): void {
+    for (const v of this.cache.values()) v.at -= ms;
+  }
+
   invalidate(prefix: string): void {
     for (const k of [...this.cache.keys()]) if (k.startsWith(prefix)) this.cache.delete(k);
   }

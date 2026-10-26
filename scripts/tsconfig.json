@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo",
+    "types": ["node"]
+  },
+  "include": ["./**/*.ts", "../apps/server/src/**/*.ts"],
+  "exclude": ["dist", "../apps/server/src/**/*.test.ts"],
+  "references": [
+    { "path": "../packages/shared" },
+    { "path": "../packages/domain" },
+    { "path": "../apps/mock-systems" }
+  ]
+}

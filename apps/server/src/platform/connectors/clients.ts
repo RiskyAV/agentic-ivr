@@ -42,6 +42,8 @@ export interface Connectors {
   };
   /** Drop cached stale-fallback entries for a system whose key starts with `prefix` (e.g. `lms:loan:PL-1`). */
   invalidate(system: SystemName, prefix: string): void;
+  /** Test hook: ages every cached fallback entry by `ms`. */
+  ageCache(ms: number): void;
 }
 
 export function buildConnectors(transport: Transport, cfg: Record<SystemName, ClientConfig> = DEFAULT_CLIENT_CONFIG): Connectors {
@@ -90,5 +92,6 @@ export function buildConnectors(transport: Transport, cfg: Record<SystemName, Cl
         map(g<{ requests: OpsRequestDto[] }>('ops', `/ops/requests${qs({ customerId })}`, `ops:requests:${customerId}`, ctx), (b) => b.requests),
     },
     invalidate: (system, prefix) => rc[system].invalidate(prefix),
+    ageCache: (ms) => { for (const c of Object.values(rc)) c.ageCache(ms); },
   };
 }

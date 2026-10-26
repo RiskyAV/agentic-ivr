@@ -484,6 +484,68 @@ describe('Engine.runTurn', () => {
   });
 });
 
+describe('Engine: stale data and placeholder scope', () => {
+  const SCHEDULE = 'Show my next three instalments';
+  const staleRules: StubRule[] = [{
+    match: new RegExp(SCHEDULE, 'i'),
+    script: [
+      [call('get_repayment_schedule', { loanId: 'HL-88231', months: 3 })],
+      [{ type: 'text', text: 'Your schedule, as of {{stale.as_of}}: first EMI {{schedule.first_emi}}.' }],
+    ],
+  }];
+
+  it('a stale tool result binds stale.<tool>.as_of and stale.as_of, tells the model so, and is visible in the trace', async () => {
+    const requests: LlmRequest[] = [];
+    const inner = new StubLlm(staleRules);
+    const s = await setup({ rules: [], llm: { stream: (req, sig) => { requests.push(req); return inner.stream(req, sig); } } });
+    // Turn 1 warms the fallback cache while the backend is healthy.
+    await s.engine.runTurn(s.session, { turnId: 't1', text: SCHEDULE, channel: 'text' }, recorder().sink);
+    s.connectors.ageCache(5 * 60_000);
+    await s.setChaos({ lms: { failRate: 1 } });
+    const r = recorder();
+    requests.length = 0;
+    await s.engine.runTurn(s.session, { turnId: 't2', text: SCHEDULE, channel: 'text' }, r.sink);
+    const answer = r.of('done')[0]!.v.text;
+    expect(answer).toMatch(/as of 5 minutes ago \(at \d\d:\d\d UTC\)/);
+    expect(r.of('trace')[0]!.trace.metrics.unverified).toBe(0);
+    expect(r.of('trace')[0]!.trace.metrics.unresolved).toBe(0);
+    expect(r.of('trace')[0]!.trace.spans.some((sp) => sp.name.startsWith('backend:') && sp.attrs?.outcome === 'stale')).toBe(true);
+    const toolMsg = [...requests.at(-1)!.messages].reverse().find((m) => m.role === 'tool') as { results: Array<{ response: { stale?: string; stale_as_of?: string } }> };
+    expect(toolMsg.results[0]!.response.stale).toContain('{{stale.get_repayment_schedule.as_of}}');
+    expect(toolMsg.results[0]!.response.stale_as_of).toBeUndefined();
+  });
+
+  it('a fresh result carries no stale note and binds no stale keys', async () => {
+    const requests: LlmRequest[] = [];
+    const inner = new StubLlm(staleRules);
+    const s = await setup({ rules: [], llm: { stream: (req, sig) => { requests.push(req); return inner.stream(req, sig); } } });
+    const r = recorder();
+    await s.engine.runTurn(s.session, { turnId: 't1', text: SCHEDULE, channel: 'text' }, r.sink);
+    const toolMsg = [...requests.at(-1)!.messages].reverse().find((m) => m.role === 'tool') as { results: Array<{ response: { stale?: string } }> };
+    expect(toolMsg.results[0]!.response.stale).toBeUndefined();
+    expect(r.of('trace')[0]!.trace.metrics.unresolved).toBe(1); // {{stale.as_of}} has no value when nothing is stale
+  });
+
+  it('placeholders resolve from this turn, the snapshot and entity memory, not from tool results of earlier turns', async () => {
+    const s = await setup({
+      rules: [
+        { match: /first/i, script: [[call('simulate_prepayment', { loanId: 'HL-88231', amount: '50k' })], [{ type: 'text', text: 'Saves {{prepay.interest_saved_tenure}}.' }]] },
+        { match: /second/i, script: [[{ type: 'text', text: 'Again {{prepay.interest_saved_tenure}}; amount {{entity.last_amount}}; EMI {{snapshot.HL-88231.emi}}.' }]] },
+      ],
+    });
+    const r1 = recorder();
+    await s.engine.runTurn(s.session, { turnId: 't1', text: 'first', channel: 'text' }, r1.sink);
+    expect(r1.of('trace')[0]!.trace.metrics.unresolved).toBe(0);
+    const r2 = recorder();
+    await s.engine.runTurn(s.session, { turnId: 't2', text: 'second', channel: 'text' }, r2.sink);
+    const t2 = r2.of('trace')[0]!.trace.metrics;
+    expect(t2.unresolved).toBe(1); // the earlier turn's tool value is gone: the model must call the tool again
+    const text = r2.of('done')[0]!.v.text;
+    expect(text).toContain('₹50,000');
+    expect(text).toContain('₹27,045');
+  });
+});
+
 describe('Engine.opener', () => {
   it('renders the workflow opener through the placeholder renderer without an LLM call', async () => {
     let calls = 0;

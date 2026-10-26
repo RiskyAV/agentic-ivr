@@ -9,9 +9,10 @@
  *  - the recorded guard classifier verdicts.
  * It prints each turn's original and replayed answer with a word diff. Exit code 1 if a recorded-LLM replay differs.
  */
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildApp } from '../apps/server/src/app.js';
 import { loadConfig, loadRootEnv } from '../apps/server/src/config.js';
 import type { Transport } from '../apps/server/src/platform/connectors/transport.js';
@@ -24,10 +25,9 @@ import { arg } from './eval/runner.js';
 
 type Ev<T extends LoggedEvent['type']> = Extract<LoggedEvent, { type: T }>;
 
-/** Serves logged backend responses by `METHOD path`, in recorded order; the last one repeats once a queue runs dry. */
+/** Serves logged backend responses by `METHOD path`, in recorded order. A request whose queue ran dry is a recorded miss (404), never a repeat of the last response. */
 export function recordedTransport(events: LoggedEvent[]): Transport & { misses: string[] } {
   const queues = new Map<string, Array<{ status: number; body: unknown }>>();
-  const last = new Map<string, { status: number; body: unknown }>();
   for (const e of events) {
     if (e.type !== 'backend_call' || e.status === undefined) continue; // stale / breaker-open events made no request
     const k = `${e.method} ${e.path}`;
@@ -37,9 +37,7 @@ export function recordedTransport(events: LoggedEvent[]): Transport & { misses: 
   const t: Transport = async ({ method, url }) => {
     const k = `${method} ${url}`;
     const next = queues.get(k)?.shift();
-    if (next) { last.set(k, next); return next; }
-    const again = last.get(k);
-    if (again) return again;
+    if (next) return next;
     misses.push(k);
     return { status: 404, body: { error: 'not_recorded' } };
   };
@@ -145,6 +143,18 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   if (!sessionId || sessionId.startsWith('--')) {
     console.error('usage: npm run replay -- <sessionId> [--turn n] [--live-llm] [--dir <dir>] [--model <name>]');
     process.exit(2);
+  }
+  if (arg('save-demo') === 'true') {
+    // Replays the session twice (recorded LLM, then live Gemini) and keeps both for docs/latency-report.md.
+    const dir0 = arg('dir', loadConfig({ ...process.env, LLM_PROVIDER: 'stub' }).config.eventLogDir)!;
+    const recorded = await replaySession(sessionId, { dir: dir0, live: false });
+    const liveRun = await replaySession(sessionId, { dir: dir0, live: true });
+    const out = join(fileURLToPath(new URL('../.data/bench/', import.meta.url)));
+    mkdirSync(out, { recursive: true });
+    writeFileSync(join(out, 'replay.json'), JSON.stringify({ sessionId, model: process.env.GEMINI_MODEL, recorded, live: liveRun }));
+    const { writeLatencyReport } = await import('./latencyReport.js');
+    console.log(`demo saved; report: ${writeLatencyReport()}`);
+    process.exit(0);
   }
   const live = arg('live-llm') === 'true';
   const only = arg('turn') ? Number(arg('turn')) : undefined;

@@ -119,6 +119,15 @@ export function registerHttp(app: FastifyInstance, ctx: GatewayCtx): void {
     return admin(reply, '/admin/chaos', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body.data) });
   });
 
+  if (ctx.config.testHooks) {
+    // Eval only: age the cached fallback data by N ms (default 5 minutes).
+    app.post<{ Body: { ms?: number } }>('/api/test/age-cache', async (req) => {
+      const ms = typeof req.body?.ms === 'number' && req.body.ms > 0 && req.body.ms < 600_000 ? req.body.ms : 300_000;
+      ctx.connectors.ageCache(ms);
+      return { aged: ms };
+    });
+  }
+
   app.post('/api/chaos/reset', async (_req, reply) => {
     for (const s of SYSTEMS) ctx.connectors.invalidate(s, '');
     return admin(reply, '/admin/reset', { method: 'POST' });

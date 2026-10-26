@@ -9,7 +9,8 @@ import type { HistoryEntry, Session } from '../context/session.js';
 import { loadSnapshot, type CustomerSnapshot } from '../context/snapshot.js';
 import { numericCheck } from '../grounding/numericCheck.js';
 import { PlaceholderRenderer } from '../grounding/renderer.js';
-import { date, formatBound, type BoundValue } from '../grounding/values.js';
+import { formatBound, type BoundValue } from '../grounding/values.js';
+import { staleValues } from './stale.js';
 import type { AuditLog } from '../actions/audit.js';
 import { refusalFor } from '../guard/refusal.js';
 import type { Guard, GuardVerdict, RefusalFn } from '../guard/types.js';
@@ -199,6 +200,7 @@ export class Engine {
     let verdict: GuardVerdict | undefined;
 
     const values: Record<string, BoundValue> = {};
+    const staleAsOf: Record<string, string> = {};
     const sources: Source[] = [];
     const tables: TableView[] = [];
     const toolEntries: HistoryEntry[] = [];
@@ -378,7 +380,7 @@ export class Engine {
           }));
         } else {
           toolRounds++;
-          results = await this.runTools(calls, { ctxBase, wf, sink, signal, remaining, cfg, values, sources, tables, toolEntries, held, updateEntities, finishedRef: () => finished || signal.aborted });
+          results = await this.runTools(calls, { ctxBase, wf, sink, signal, remaining, cfg, values, stale: staleAsOf, sources, tables, toolEntries, held, updateEntities, finishedRef: () => finished || signal.aborted });
           if (signal.aborted) return await finishAborted();
         }
         messages.push({ role: 'tool', results });
@@ -487,6 +489,8 @@ export class Engine {
       remaining: () => number;
       cfg: EngineConfig & { reserveMs: number };
       values: Record<string, BoundValue>;
+      /** asOf of each stale tool result in this turn, by tool name. */
+      stale: Record<string, string>;
       sources: Source[];
       tables: TableView[];
       toolEntries: HistoryEntry[];
@@ -547,7 +551,10 @@ export class Engine {
         return;
       }
       Object.assign(t.values, result.values ?? {});
-      if (result.ok && result.stale) t.values['stale.as_of'] = date(result.stale.asOf.slice(0, 10));
+      if (result.ok && result.stale) {
+        t.stale[call.name] = result.stale.asOf;
+        Object.assign(t.values, staleValues(t.stale, Date.now()));
+      }
       t.updateEntities(call.name, result);
       if (result.ok) {
         t.sources.push(...result.sources);
@@ -566,7 +573,7 @@ export class Engine {
             data: wrapStrings(redact(result.data)),
             values: valueList(result.values),
             sources: result.sources.map((x) => x.ref),
-            ...(result.stale && { stale: 'These figures come from an earlier successful check, not live data. Say they are as of {{stale.as_of}}.' }),
+            ...(result.stale && { stale: `NOT LIVE: these figures come from an earlier successful check because the system did not respond now. You must tell the customer plainly that this is not live data and that it is as of {{stale.${call.name}.as_of}}.` }),
           },
         });
       } else {

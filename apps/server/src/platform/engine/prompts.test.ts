@@ -75,6 +75,23 @@ describe('buildPrompt', () => {
     expect(system).toContain("Today's date is 2026-10-25");
   });
 
+  it('confirmation guidance is channel-specific: Confirm button on text, spoken yes on voice', () => {
+    const text = build([], 'text').system;
+    const voice = build([], 'voice').system;
+    expect(text).toMatch(/taps the Confirm button/);
+    expect(text).toMatch(/never tell them to say yes/);
+    expect(text).not.toMatch(/say yes to confirm/);
+    expect(voice).toMatch(/say yes to confirm/);
+    expect(voice).not.toMatch(/taps the Confirm button/);
+  });
+
+  it('states the placeholder scope and the within-one-turn duplicate-call rule consistently', () => {
+    const { system } = build([], 'text');
+    expect(system).toMatch(/THIS turn, in the customer snapshot, or in the conversation memory \(\{\{entity\.last_amount\}\}\)/);
+    expect(system).toMatch(/applies within one turn only/);
+    expect(system).toMatch(/with the same arguments in one turn/);
+  });
+
   it('voice adds style block, text differs', () => {
     expect(build([], 'voice').system).toMatch(/no tables/i);
     expect(build([], 'voice').system).toMatch(/one question at a time/i);
