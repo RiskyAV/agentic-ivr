@@ -1,7 +1,7 @@
 # AI Loan Servicing PoC — Design
 
 **Date:** 2026-10-25
-**Context:** Take-home for Blue Machines (Sr. EM, Forward Deployed Engineering). Brief: `docs/brief/challenge.pdf` (JD: `docs/brief/job-description.pdf`). Decisions and rationale are logged in `/DECISIONS.md`.
+**Context:** Take-home for Blue Machines (Sr. EM, Forward Deployed Engineering). Brief and job description: (challenge brief provided privately by Blue Machines; not included in this repo). Decisions and rationale are logged in `/DECISIONS.md`.
 
 **Required deliverables (from the brief):** (1) a working UI with real journeys in text and voice; (2) a functional backend (integrations, query intelligence, actions); (3) a reusable component shown across two workflows; (4) performance evidence (conversational + backend latency); (5) a concise technical write-up (architecture, decisions, trade-offs); (6) a source repo with run instructions. Submission is by email reply with the repo link. No video is required.
 
