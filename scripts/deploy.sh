@@ -11,26 +11,40 @@
 #   scripts/deploy.sh web-build | web | all [--dry-run] [--skip-build]
 #       Build apps/web with VITE_API_BASE; `web` also runs `wrangler pages deploy`; `all` = api + web.
 #
-# Environment:
-#   bootstrap: GCP_PROJECT (GCP_PROJECT) GCP_ZONE (VM_ZONE) GCP_VM (VM_NAME) DEPLOY_HOST (for the
-#              printed known_hosts line; the VM's external IP or DNS name)
+# Environment (no infrastructure names are hard-coded; the owner keeps them in the git-ignored deploy/local.env, which
+# this script loads if present, without overriding variables already set; see deploy/local.env.example):
+#   bootstrap: GCP_PROJECT, VM_NAME, VM_ZONE (all required); DEPLOY_HOST (for the printed known_hosts line; the VM's
+#              external IP or DNS name); PROTECTED_NGINX_SITES (space-separated nginx site names of other tenants on
+#              the VM; bootstrap aborts if any of them changes; default empty)
 #   api:       DEPLOY_HOST (required) DEPLOY_USER (loandeploy) DEPLOY_KEY_FILE (~/.ssh/loan-poc-deploy)
 #              DEPLOY_KNOWN_HOSTS_FILE (~/.ssh/known_hosts)
-#   web:       API_BASE (https://api.sparsan.com) PAGES_PROJECT (loan-poc) PAGES_BRANCH (main)
+#   web:       API_BASE (https://$API_DOMAIN, default https://api.sparsan.com) PAGES_PROJECT (loan-poc) PAGES_BRANCH (main)
 #
 # Only our own files are written on the VM: /opt/loan-poc, /usr/local/sbin/loan-poc-*, /etc/sudoers.d/loan-poc-deploy,
-# /etc/systemd/system/loan-{api,mocks}.service, the nginx site file loan-poc-api.conf. Another nginx site (e.g.
-# `cohost`) and port 3000 are never touched. App secrets live only in /opt/loan-poc/.env on the VM.
+# /etc/systemd/system/loan-{api,mocks}.service, the nginx site file loan-poc-api.conf. Other nginx sites and ports are
+# never edited; the sites in PROTECTED_NGINX_SITES are checksummed before and after. Secrets live only in
+# /opt/loan-poc/.env on the VM.
 set -euo pipefail
 
-GCP_PROJECT="${GCP_PROJECT:-GCP_PROJECT}"
-GCP_ZONE="${GCP_ZONE:-VM_ZONE}"
-GCP_VM="${GCP_VM:-VM_NAME}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+LOCAL_ENV="${DEPLOY_LOCAL_ENV:-$ROOT/deploy/local.env}"
+if [ -f "$LOCAL_ENV" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^[[:space:]]*([A-Z_][A-Z0-9_]*)=(.*)$ ]] || continue
+    k="${BASH_REMATCH[1]}"; v="${BASH_REMATCH[2]}"; v="${v%\"}"; v="${v#\"}"
+    [ -n "${!k:-}" ] || export "$k=$v"
+  done < "$LOCAL_ENV"
+fi
+
+GCP_PROJECT="${GCP_PROJECT:-}"
+VM_NAME="${VM_NAME:-}"
+VM_ZONE="${VM_ZONE:-}"
+PROTECTED_NGINX_SITES="${PROTECTED_NGINX_SITES:-}"
 DEPLOY_HOST="${DEPLOY_HOST:-}"
 DEPLOY_USER="${DEPLOY_USER:-loandeploy}"
 DEPLOY_KEY_FILE="${DEPLOY_KEY_FILE:-$HOME/.ssh/loan-poc-deploy}"
 DEPLOY_KNOWN_HOSTS_FILE="${DEPLOY_KNOWN_HOSTS_FILE:-$HOME/.ssh/known_hosts}"
-API_BASE="${API_BASE:-https://api.sparsan.com}"
+API_BASE="${API_BASE:-https://${API_DOMAIN:-api.sparsan.com}}"
 PAGES_PROJECT="${PAGES_PROJECT:-loan-poc}"
 PAGES_BRANCH="${PAGES_BRANCH:-main}"
 
@@ -51,7 +65,6 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$MODE" ] || { sed -n '2,26p' "$0"; exit 2; }
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 log() { printf '\n==> %s\n' "$*"; }
@@ -117,7 +130,22 @@ HEAD
   printf 'NGINX_B64=%q\n' "$(base64 < deploy/nginx-api.conf | tr -d '\n')"
   printf 'PUBKEY=%q\n' "$pubkey"
   printf 'DEPLOY_HOST=%q\n' "$DEPLOY_HOST"
+  printf 'PROTECTED_NGINX_SITES=%q\n' "$PROTECTED_NGINX_SITES"
   cat <<'TAIL'
+
+echo "--> protected nginx sites: ${PROTECTED_NGINX_SITES:-none}"
+site_sums() {
+  local s f
+  for s in $PROTECTED_NGINX_SITES; do
+    for f in "/etc/nginx/sites-available/$s" "/etc/nginx/sites-enabled/$s" "/etc/nginx/conf.d/$s.conf"; do
+      if [ -e "$f" ]; then printf '%s %s\n' "$f" "$(readlink -f "$f") $(sha256sum < "$f" | cut -d' ' -f1)"; else printf '%s absent\n' "$f"; fi
+    done
+  done
+}
+for s in $PROTECTED_NGINX_SITES; do
+  case "$s" in loan-poc-api|loan-poc-api.conf) echo "PROTECTED_NGINX_SITES must not name our own site ($s)" >&2; exit 1 ;; esac
+done
+PROTECTED_BEFORE="$(site_sums)"
 
 echo "--> sudoers: loandeploy may run only loan-poc-activate"
 tmp="$(mktemp)"
@@ -156,6 +184,12 @@ else
   systemctl reload nginx
 fi
 
+if [ "$(site_sums)" != "$PROTECTED_BEFORE" ]; then
+  echo "a protected nginx site changed during bootstrap; investigate before continuing:" >&2
+  diff <(printf '%s\n' "$PROTECTED_BEFORE") <(site_sums) >&2 || true
+  exit 1
+fi
+
 if [ -L "$APP/current" ]; then
   echo "--> restart (units may have changed)"; systemctl restart loan-mocks loan-api
 fi
@@ -172,16 +206,21 @@ do_bootstrap() {
   local pubkey
   pubkey="$(head -n1 "$PUBKEY_FILE")"
   [[ "$pubkey" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+(\ [^\"]*)?$ ]] || { echo "--pubkey must be one ssh-ed25519 public key line" >&2; exit 2; }
+  local missing="" v
+  for v in GCP_PROJECT VM_NAME VM_ZONE; do [ -n "${!v}" ] || missing="$missing $v"; done
+  [ -z "$missing" ] || { echo "bootstrap needs:${missing} (set them, or put them in deploy/local.env)" >&2; exit 2; }
   [ -n "$DEPLOY_HOST" ] || echo "note: DEPLOY_HOST is unset; the printed known_hosts line will need the host filled in" >&2
 
-  log "bootstrap ${GCP_VM} (${GCP_PROJECT}/${GCP_ZONE}) as $(gcloud config get-value account 2>/dev/null || echo you)"
+  log "bootstrap ${VM_NAME} (${GCP_PROJECT}/${VM_ZONE}) as $(gcloud config get-value account 2>/dev/null || echo you)"
   if [ "$DRY_RUN" = 1 ]; then
+    printf '[dry-run] GCP_PROJECT=%s VM_NAME=%s VM_ZONE=%s DEPLOY_HOST=%s PROTECTED_NGINX_SITES=%q\n' \
+      "$GCP_PROJECT" "$VM_NAME" "$VM_ZONE" "${DEPLOY_HOST:-<unset>}" "$PROTECTED_NGINX_SITES"
     printf '[dry-run] gcloud compute ssh %s --project %s --zone %s --command "sudo bash -s" <<bootstrap script>>\n' \
-      "$GCP_VM" "$GCP_PROJECT" "$GCP_ZONE"
+      "$VM_NAME" "$GCP_PROJECT" "$VM_ZONE"
     bootstrap_script "$pubkey" | sed -E 's/^(put [^ ]+ [^ ]+ [^ ]+ ).*/\1<base64 of the repo file>/; s/^(NGINX_B64=).*/\1<base64 of deploy\/nginx-api.conf>/' | sed 's/^/    | /'
   else
     need gcloud
-    bootstrap_script "$pubkey" | gcloud compute ssh "$GCP_VM" --project "$GCP_PROJECT" --zone "$GCP_ZONE" --command "sudo bash -s"
+    bootstrap_script "$pubkey" | gcloud compute ssh "$VM_NAME" --project "$GCP_PROJECT" --zone "$VM_ZONE" --command "sudo bash -s"
   fi
 }
 
@@ -194,7 +233,8 @@ ssh_opts() {
 
 deploy_api() {
   need git
-  [ -n "$DEPLOY_HOST" ] || { echo "DEPLOY_HOST is required for api" >&2; exit 2; }
+  [ -n "$DEPLOY_HOST" ] || { echo "DEPLOY_HOST is required for api (set it, or put it in deploy/local.env)" >&2; exit 2; }
+  [ "$DRY_RUN" = 0 ] || printf '[dry-run] DEPLOY_HOST=%s DEPLOY_USER=%s API_BASE=%s\n' "$DEPLOY_HOST" "$DEPLOY_USER" "$API_BASE"
   if [ "$DRY_RUN" = 0 ]; then
     need ssh
     [ -f "$DEPLOY_KEY_FILE" ] || { echo "deploy key not found: $DEPLOY_KEY_FILE" >&2; exit 2; }

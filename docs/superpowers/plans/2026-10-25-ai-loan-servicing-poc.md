@@ -1034,12 +1034,12 @@ UI requirements (from spec §7):
 - `Dockerfile`: multi-stage Node 22. It builds `packages/*`, `apps/server` and `apps/mock-systems`, and its `CMD ["scripts/start.sh"]` starts the mocks on `127.0.0.1:4100` and the server on `$PORT`.
 - `deploy.sh`:
   - builds;
-  - `gcloud compute scp` (project `GCP_PROJECT`, zone `VM_ZONE`, VM `VM_NAME`) to `/opt/loan-poc`;
+  - `gcloud compute scp` (project `$GCP_PROJECT`, zone `$VM_ZONE`, VM `$VM_NAME`, from the git-ignored `deploy/local.env`) to `/opt/loan-poc`;
   - `npm ci --omit=dev` remotely;
   - installs the systemd units and the nginx server block for `api.sparsan.com` (WebSocket upgrade, `proxy_read_timeout 3600s`), `nginx -t && systemctl reload nginx`;
   - restarts the units;
   - deploys the web build with `npx wrangler pages deploy apps/web/dist --project-name loan-poc`.
-  - It **must not touch** the existing `cohost` nginx site or anything on port 3000.
+  - It **must not touch** the existing co-hosted nginx site (`PROTECTED_NGINX_SITES`) or its port.
 
 - [ ] **Step 1:** Write the docs and packaging files.
 - [ ] **Step 2:** Verify:
@@ -1049,7 +1049,7 @@ UI requirements (from spec §7):
 
 ### Task 23: Deploy and verify hosted demo (operational — confirm with user before running)
 
-- [ ] **Step 1:** Confirm with the user before changing the VM or DNS. Create the DNS records in Cloudflare: `api.sparsan.com` (A → DEPLOY_HOST, proxied) and the Pages custom domain `loans.sparsan.com`. Get TLS through Cloudflare (Full mode with an origin certificate, or certbot on the VM), whichever fits the existing nginx setup, which needs checking first.
+- [ ] **Step 1:** Confirm with the user before changing the VM or DNS. Create the DNS records in Cloudflare: `api.sparsan.com` (A → `$DEPLOY_HOST`, proxied) and the Pages custom domain `loans.sparsan.com`. Get TLS through Cloudflare (Full mode with an origin certificate, or certbot on the VM), whichever fits the existing nginx setup, which needs checking first.
 - [ ] **Step 2:** Run `scripts/deploy.sh`. Verify:
   - `curl https://api.sparsan.com/api/health` returns ok;
   - `https://loans.sparsan.com` loads and logs in with the access code;

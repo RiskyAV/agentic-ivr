@@ -7,3 +7,5 @@ dist/
 .DS_Store
 .superpowers/
 .data/
+# Private deploy settings (real project, VM and host names)
+deploy/local.env

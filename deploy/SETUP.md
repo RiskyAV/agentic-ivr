@@ -16,13 +16,13 @@ Fixed names used below:
 | What | Value |
 |---|---|
 | Repository | `RiskyAV/agentic-ivr` (public; only the owner pushes) |
-| GCP project / zone / VM | `GCP_PROJECT` / `VM_ZONE` / `VM_NAME` (metadata SSH keys, port 22 open, Node 22 at `/usr/bin/node`, certbot installed) |
+| GCP project / zone / VM | `$GCP_PROJECT` / `$VM_ZONE` / `$VM_NAME`, kept in the git-ignored `deploy/local.env` (template: `deploy/local.env.example`). The VM has metadata SSH keys, port 22 open, Node 22 at `/usr/bin/node` and certbot installed |
 | API domain | `api.sparsan.com` → nginx on the VM → `127.0.0.1:4000` |
 | Pages project | `loan-poc` (production branch `main`) |
 | VM users | `loandeploy` (CI uploads and activation only), `loanbuild` (builds releases), `loanpoc` (runs the app); only `loandeploy` has a shell, and it is reachable only through the forced command |
 | VM paths | `/opt/loan-poc/{incoming,releases,current,data,.env}` |
 
-The VM already serves another site, `cohost`, which holds `default_server` on 80/443 and uses port 3000. Nothing here or in `deploy.sh` edits that site, changes the default server or uses that port. Our block matches only `server_name api.sparsan.com`. Our files are:
+The VM may already serve an existing co-hosted site, which holds `default_server` on 80/443 and uses its own port. Nothing here or in `deploy.sh` edits that site, changes the default server or uses that port. List its nginx site name(s) in `PROTECTED_NGINX_SITES` (in `deploy/local.env`; default empty): bootstrap checksums those site files before and after and aborts if any changed. Our block matches only `server_name api.sparsan.com`. Our files are:
 
 - `/etc/nginx/sites-{available,enabled}/loan-poc-api.conf`;
 - `/etc/systemd/system/loan-{api,mocks}.service`;
@@ -32,11 +32,12 @@ The VM already serves another site, `cohost`, which holds `default_server` on 80
 - everything under `/opt/loan-poc`.
 
 ```bash
-# Shell variables used throughout
-export PROJECT=GCP_PROJECT ZONE=VM_ZONE VM=VM_NAME
+# Shell variables used throughout (deploy/local.env holds GCP_PROJECT, VM_NAME, VM_ZONE, DEPLOY_HOST, PROTECTED_NGINX_SITES)
+set -a; . deploy/local.env; set +a
+export PROJECT=$GCP_PROJECT ZONE=$VM_ZONE VM=$VM_NAME
 export REPO=RiskyAV/agentic-ivr
-export DEPLOY_HOST=$(gcloud compute instances describe $VM --project $PROJECT --zone $ZONE \
-  --format='value(networkInterfaces[0].accessConfigs[0].natIP)')   # the VM's external IP (make sure it is static)
+export DEPLOY_HOST=${DEPLOY_HOST:-$(gcloud compute instances describe $VM --project $PROJECT --zone $ZONE \
+  --format='value(networkInterfaces[0].accessConfigs[0].natIP)')}   # the VM's external IP (make sure it is static)
 ```
 
 ---
@@ -211,7 +212,7 @@ Re-run bootstrap whenever `deploy/*.service`, `deploy/nginx-api.conf` or the two
   The build directory, which holds its own npm cache, cannot be reached by `loanpoc` (the live app) or `loandeploy`. Afterwards every `loanbuild` process is killed, and the deploy aborts if any survives. Root then locks the tree, aborts if any file has extra hardlinks, and changes ownership to root and the tree to read-only without following links. Only then is it moved into place. If a first deploy fails, it stops the units and removes the release. A later failure rolls back to the previous release.
 - It never installs units, nginx config or sudoers from the tarball.
 
-So a leaked key lets an attacker deploy arbitrary **application code that runs as `loanpoc`**. During a build, the attacker's archive also influences what `npm ci` does inside the sandbox as `loanbuild`, but nothing from the build outlives it: the processes are killed, the per-build cache is deleted, and the tree becomes root-owned. That application code can read `/opt/loan-poc/.env` (the app's API keys) and serve traffic on `api.sparsan.com`. Neither app code nor build code can reach the GCE metadata server (`IPAddressDeny=169.254.169.254`), so it cannot obtain the VM service account's tokens. The units also run with `ProtectSystem=strict` (only `/opt/loan-poc/data` is writable) and `RemoveIPC`. Build code also cannot reach loopback services (only the resolved DNS stub). **App code, however, can still reach other loopback services on this shared VM at the network level, for example the `cohost` backend on 127.0.0.1:3000.** It needs loopback to talk to its mocks, and isolating that would need a network namespace. For production, run this app on its own VM (or container host) rather than next to another site. It cannot get a shell as `loandeploy`, run other root commands, touch the `cohost` site, change nginx/systemd/sudoers, or read other users' files beyond what `loanpoc` can. **Recovery** if the key leaks:
+So a leaked key lets an attacker deploy arbitrary **application code that runs as `loanpoc`**. During a build, the attacker's archive also influences what `npm ci` does inside the sandbox as `loanbuild`, but nothing from the build outlives it: the processes are killed, the per-build cache is deleted, and the tree becomes root-owned. That application code can read `/opt/loan-poc/.env` (the app's API keys) and serve traffic on `api.sparsan.com`. Neither app code nor build code can reach the GCE metadata server (`IPAddressDeny=169.254.169.254`), so it cannot obtain the VM service account's tokens. The units also run with `ProtectSystem=strict` (only `/opt/loan-poc/data` is writable) and `RemoveIPC`. Build code also cannot reach loopback services (only the resolved DNS stub). **App code, however, can still reach other loopback services on this shared VM at the network level, for example the co-hosted site's backend port.** It needs loopback to talk to its mocks, and isolating that would need a network namespace. For production, run this app on its own VM (or container host) rather than next to another site. It cannot get a shell as `loandeploy`, run other root commands, touch the co-hosted site, change nginx/systemd/sudoers, or read other users' files beyond what `loanpoc` can. **Recovery** if the key leaks:
 1. Rotate the key (below). This removes the key holder's only foothold, because no build-time process or cache survives a deploy.
 2. Redeploy a known-good commit, which replaces the attacker's app code.
 3. Rotate the secrets in `.env`, since attacker code running as `loanpoc` could have read them.
