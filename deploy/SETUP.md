@@ -259,6 +259,15 @@ npx wrangler pages project create loan-poc --production-branch main
 
 Store the token with `gh secret set` (section 4). The account ID is shown on the Workers & Pages overview page.
 
+**Shared demo password.** One password gates the whole demo: it is `SITE_PASSWORD` on Cloudflare Pages (HTTP Basic Auth in `functions/_middleware.ts`, any username) and must equal `DEMO_ACCESS_CODE` in the VM's `.env` (the API checks it as the `X-Access-Code` header and on login). Set it once, before the first deploy that includes the functions:
+
+```bash
+npx wrangler pages secret put SITE_PASSWORD --project-name loan-poc   # paste the password at the prompt
+# and on the VM: DEMO_ACCESS_CODE=<the same value> in /opt/loan-poc/.env, then restart the service
+```
+
+Without `SITE_PASSWORD` the site answers 503 (fail closed). Wrangler deploys `functions/` from the repository root, so run `pages deploy` from there (`scripts/deploy.sh web` and the workflow both do). **Rotation:** put the new value into both places (Pages secret, then redeploy so it takes effect; VM `.env`, then restart), and tell reviewers; the 12-hour `demo_access` cookie and old sessions stop working once the API restarts. For local checks of the functions, put `SITE_PASSWORD=...` in the git-ignored `.dev.vars` and run `npx wrangler pages dev apps/web/dist`.
+
 **DNS** (zone `sparsan.com`):
 
 | Record | Value | Proxy |

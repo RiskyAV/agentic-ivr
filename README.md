@@ -127,6 +127,7 @@ The image runs the server and the mock systems: `scripts/start.sh` supervises bo
 ## Security and secrets
 
 - **App secrets** (Gemini and ElevenLabs keys, session secret, demo access code) live **only on the VM**, in `/opt/loan-poc/.env` (mode 640). They are copied once by hand. No workflow writes them, and the browser never sees them.
+- **Shared demo password.** One value is used in two places: `SITE_PASSWORD`, a Cloudflare Pages secret (`wrangler pages secret put SITE_PASSWORD --project-name loan-poc`) that puts HTTP Basic Auth in front of the whole site (`functions/_middleware.ts`), and `DEMO_ACCESS_CODE` on the VM, which the API requires as the `X-Access-Code` header (or a session token) on every `/api` route except health and login. Neither is in the repository or a workflow. To rotate, change both and redeploy and restart ([deploy/SETUP.md §5](deploy/SETUP.md#5-cloudflare-pages-project-api-token-dns)). The site is also `noindex`.
 - **CI** holds no cloud credentials, only the following, all as secrets of the `production` environment, which runs on `main` only:
   - an SSH deploy key, with its host key pinned;
   - a Cloudflare token scoped to Pages edit.

@@ -133,7 +133,7 @@ describe('HTTP', () => {
     expect((await login('C1001', {}, gated.base)).res.status).toBe(401);
     expect((await login('C1001', { accessCode: 'nope' }, gated.base)).res.status).toBe(401);
     expect((await login('C1001', { accessCode: 'letmein' }, gated.base)).res.status).toBe(200);
-    const list = (await (await fetch(`${gated.base}/api/demo-customers`)).json()) as { customers: { id: string }[]; requiresAccessCode: boolean };
+    const list = (await (await fetch(`${gated.base}/api/demo-customers`, { headers: { 'x-access-code': 'letmein' } })).json()) as { customers: { id: string }[]; requiresAccessCode: boolean };
     expect(list.requiresAccessCode).toBe(true);
     expect(list.customers.map((c) => c.id)).toContain('C1001');
   });
@@ -183,15 +183,34 @@ describe('HTTP', () => {
     expect(after.payments.extraLatencyMs).toBe(0);
   });
 
-  it('with DEMO_ACCESS_CODE set, chaos changes need a session token; chaos GET and metrics stay open', async () => {
+  it('with DEMO_ACCESS_CODE set, /api needs X-Access-Code or a Bearer token; health and login stay open', async () => {
+    const g = await startApp(testConfig({ demoAccessCode: 'letmein' }));
+    const code = { 'x-access-code': 'letmein' };
+    for (const path of ['/api/demo-customers', '/api/workflows', '/api/metrics', '/api/chaos']) {
+      expect((await fetch(`${g.base}${path}`)).status, path).toBe(401);
+      expect((await fetch(`${g.base}${path}`, { headers: { 'x-access-code': 'wrong' } })).status, path).toBe(401);
+      expect((await fetch(`${g.base}${path}`, { headers: code })).status, path).toBe(200);
+    }
+    expect(((await (await fetch(`${g.base}/api/metrics`)).json()) as { error: string }).error).toBe('unauthorized');
+    expect((await fetch(`${g.base}/api/health`)).status).toBe(200);
+    expect((await login('C1001', { accessCode: 'letmein' }, g.base)).res.status).toBe(200);
+    const { body: s } = await login('C1001', { accessCode: 'letmein' }, g.base);
+    expect((await fetch(`${g.base}/api/workflows`, { headers: { authorization: `Bearer ${s.token}` } })).status).toBe(200);
+    expect((await fetch(`${g.base}/api/workflows`, { headers: { authorization: 'Bearer forged.token' } })).status).toBe(401);
+    const pre = await fetch(`${g.base}/api/workflows`, { method: 'OPTIONS', headers: { origin: 'http://localhost:5173' } });
+    expect(pre.status).toBe(204);
+    // No gate when no code is configured.
+    expect((await fetch(`${base}/api/workflows`)).status).toBe(200);
+  });
+
+  it('with DEMO_ACCESS_CODE set, chaos changes need a session token (the access code alone is not enough)', async () => {
     const g = await startApp(testConfig({ demoAccessCode: 'letmein' }));
     const body = JSON.stringify({ payments: { extraLatencyMs: 7 } });
     const json = { 'content-type': 'application/json' };
     expect((await fetch(`${g.base}/api/chaos`, { method: 'PUT', headers: json, body })).status).toBe(401);
     expect((await fetch(`${g.base}/api/chaos/reset`, { method: 'POST' })).status).toBe(401);
     expect((await fetch(`${g.base}/api/chaos/reset`, { method: 'POST', headers: { authorization: 'Bearer forged.token' } })).status).toBe(401);
-    expect((await fetch(`${g.base}/api/chaos`)).status).toBe(200);
-    expect((await fetch(`${g.base}/api/metrics`)).status).toBe(200);
+    expect((await fetch(`${g.base}/api/chaos`, { method: 'PUT', headers: { ...json, 'x-access-code': 'letmein' }, body })).status).toBe(401);
     const { body: s } = await login('C1001', { accessCode: 'letmein' }, g.base);
     const authz = { authorization: `Bearer ${s.token}` };
     expect((await fetch(`${g.base}/api/chaos`, { method: 'PUT', headers: { ...json, ...authz }, body })).status).toBe(200);

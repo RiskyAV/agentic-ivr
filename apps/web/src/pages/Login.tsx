@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { ArrowRight, Loader2, LockKeyhole, ShieldCheck } from 'lucide-react';
-import { api, ApiError, type DemoCustomer } from '../api';
+import { accessCodeFromCookie, api, ApiError, type DemoCustomer } from '../api';
 import { Wordmark } from '../components/Brand';
 import type { StoredSession } from '../session';
 
@@ -13,6 +13,7 @@ export function Login({ onSignedIn }: { onSignedIn: (s: StoredSession) => void }
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [otp, setOtp] = useState('');
+  const cookieCode = accessCodeFromCookie();
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -33,10 +34,10 @@ export function Login({ onSignedIn }: { onSignedIn: (s: StoredSession) => void }
     setError(null);
     if (!selected) return setError('Choose a customer to continue.');
     if (!/^\d{6}$/.test(otp)) return setError('Enter the 6-digit one-time password.');
-    if (needsCode && !code.trim()) return setError('Enter the demo access code.');
+    if (needsCode && !(cookieCode ?? code).trim()) return setError('Enter the demo access code.');
     setBusy(true);
     try {
-      const r = await api.login(selected, otp, needsCode ? code.trim() : undefined);
+      const r = await api.login(selected, otp, needsCode ? (cookieCode ?? code).trim() : undefined);
       const c = customers?.find((x) => x.id === selected);
       onSignedIn({ token: r.token, customerId: selected, name: c?.name ?? '' });
     } catch (err) {
@@ -95,7 +96,7 @@ export function Login({ onSignedIn }: { onSignedIn: (s: StoredSession) => void }
             )}
           </fieldset>
 
-          <div className={`mt-6 grid gap-4 ${needsCode ? 'sm:grid-cols-2' : 'sm:max-w-xs'}`}>
+          <div className={`mt-6 grid gap-4 ${needsCode && !cookieCode ? 'sm:grid-cols-2' : 'sm:max-w-xs'}`}>
             <div>
               <label htmlFor="otp" className="text-sm font-medium text-slate-700">One-time password</label>
               <input
@@ -106,7 +107,7 @@ export function Login({ onSignedIn }: { onSignedIn: (s: StoredSession) => void }
               />
               <p className="mt-1.5 text-xs text-slate-500">Use <span className="tnum font-medium text-slate-700">123456</span> for this demo.</p>
             </div>
-            {needsCode && (
+            {needsCode && !cookieCode && (
               <div>
                 <label htmlFor="code" className="text-sm font-medium text-slate-700">Demo access code</label>
                 <input

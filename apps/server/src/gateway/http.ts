@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { DEMO_CUSTOMERS } from '@app/shared';
@@ -37,11 +37,25 @@ export function registerHttp(app: FastifyInstance, ctx: GatewayCtx): void {
     if (req.method === 'OPTIONS') {
       if (ok) {
         reply.header('access-control-allow-methods', 'GET,POST,PUT,OPTIONS');
-        reply.header('access-control-allow-headers', 'authorization,content-type');
+        reply.header('access-control-allow-headers', 'authorization,content-type,x-access-code');
         reply.header('access-control-max-age', '600');
       }
       return reply.code(204).send();
     }
+  });
+
+  /** With DEMO_ACCESS_CODE set, every /api route except health and login needs the code header or a valid session token. */
+  const sha = (v: string) => createHash('sha256').update(v).digest();
+  app.addHook('onRequest', async (req, reply) => {
+    const code = ctx.config.demoAccessCode;
+    if (!code) return;
+    const path = req.url.split('?')[0];
+    if (!path?.startsWith('/api/') || path === '/api/health' || path === '/api/login') return;
+    const h = req.headers['x-access-code'];
+    if (typeof h === 'string' && timingSafeEqual(sha(h), sha(code))) return;
+    const t = bearer(req.headers.authorization);
+    if (t && verifyToken(t, ctx.config.sessionSecret, ctx.now())) return;
+    return reply.code(401).send({ error: 'unauthorized' });
   });
 
   const auth = (req: FastifyRequest, reply: FastifyReply): TokenPayload | null => {

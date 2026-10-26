@@ -10,12 +10,24 @@ export const SYSTEMS: SystemName[] = ['crm', 'lms', 'payments', 'policy', 'ops']
 let authToken: string | undefined;
 export function setApiToken(token: string | undefined): void { authToken = token; }
 
+/** The shared demo password, set as a readable cookie by the edge gate on the HTML response (absent in local dev). */
+export function accessCodeFromCookie(): string | undefined {
+  try {
+    const m = /(?:^|;\s*)demo_access=([^;]*)/.exec(document.cookie);
+    return m?.[1] ? decodeURIComponent(m[1]) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) { super(message); }
 }
 
 async function call<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {
   const headers: Record<string, string> = { ...(init.body ? { 'content-type': 'application/json' } : {}) };
+  const access = accessCodeFromCookie();
+  if (access) headers['x-access-code'] = access;
   if (token) headers.authorization = `Bearer ${token}`;
   let res: Response;
   try {

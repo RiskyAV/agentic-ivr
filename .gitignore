@@ -9,3 +9,7 @@ dist/
 .data/
 # Private deploy settings (real project, VM and host names)
 deploy/local.env
+
+# Local Pages Functions secrets
+.dev.vars
+.wrangler/

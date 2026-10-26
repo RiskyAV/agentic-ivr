@@ -418,3 +418,10 @@ Status: `Accepted` = agreed, `Proposed` = suggested but not yet confirmed, `Supe
 - **Decision:** `EventLog.append` catches its own failures (warns once, records `event_log_errors`), so a full or broken disk cannot fail a turn or a confirm's `action_result`. The directory is capped at 200 MB: past the cap the oldest session files (by modification time, never the one being written) are deleted down to 80%.
 - **Rejected:** An asynchronous buffered writer (the production path in the latency report); not needed at PoC volume.
 - **Trade-off:** Replay is impossible for sessions whose files were pruned or whose events were dropped.
+
+## D-057 — One shared password: edge Basic Auth for the site, access-code header for the API
+- **Date:** 2026-10-26 · **Status:** Accepted
+- **Decision:** A Cloudflare Pages Functions middleware (`functions/_middleware.ts`, decision logic in `edge/siteGate.ts`) requires HTTP Basic Auth (any username, password = `SITE_PASSWORD`, constant-time compare; 503 when unset) on every site request, and sets `noindex`. The API requires `X-Access-Code` (= `DEMO_ACCESS_CODE`) or a valid session token on every `/api` route except health and login. The same value is used for both, so a reviewer types it once.
+- **Cookie trade-off:** The API is on another origin, so the browser cannot forward the Basic credentials. On HTML responses the middleware sets a non-HttpOnly `demo_access` cookie (Secure, SameSite=Strict, 12 h) that the SPA reads to send the header and skip the access-code field. Any script on the page could read it; accepted because it is the secret the user just typed, the app has no third-party scripts, and it only guards synthetic data.
+- **Rejected:** Cloudflare Access (needs an identity setup the reviewers do not have); a per-user login (out of scope for a PoC); gating only login (leaves metrics, chaos reads and workflows public).
+- **Trade-off:** A shared secret cannot be revoked per reviewer; rotation is manual in two places. Chaos writes still need a session token, not just the code.
