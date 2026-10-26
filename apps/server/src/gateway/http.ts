@@ -51,6 +51,9 @@ export function registerHttp(app: FastifyInstance, ctx: GatewayCtx): void {
     return p;
   };
 
+  /** With DEMO_ACCESS_CODE set (hosted demo), changing chaos needs a signed-in session; open otherwise (local dev, bench). */
+  const gated = (req: FastifyRequest, reply: FastifyReply): boolean => !ctx.config.demoAccessCode || auth(req, reply) !== null;
+
   app.get('/api/health', async () => ({ ok: true }));
 
   app.get('/api/demo-customers', async () => ({
@@ -114,6 +117,7 @@ export function registerHttp(app: FastifyInstance, ctx: GatewayCtx): void {
   app.get('/api/chaos', async (_req, reply) => admin(reply, '/admin/chaos', { method: 'GET' }));
 
   app.put('/api/chaos', async (req, reply) => {
+    if (!gated(req, reply)) return reply;
     const body = ChaosBody.safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'bad_request', message: body.error.issues[0]?.message ?? 'Invalid chaos settings' });
     return admin(reply, '/admin/chaos', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body.data) });
@@ -128,7 +132,8 @@ export function registerHttp(app: FastifyInstance, ctx: GatewayCtx): void {
     });
   }
 
-  app.post('/api/chaos/reset', async (_req, reply) => {
+  app.post('/api/chaos/reset', async (req, reply) => {
+    if (!gated(req, reply)) return reply;
     for (const s of SYSTEMS) ctx.connectors.invalidate(s, '');
     return admin(reply, '/admin/reset', { method: 'POST' });
   });

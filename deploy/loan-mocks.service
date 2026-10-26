@@ -1,0 +1,23 @@
+[Unit]
+Description=loan-poc mock enterprise systems (CRM, LMS, payments, policy, ops) on 127.0.0.1:4100
+After=network.target
+
+[Service]
+Type=simple
+User=loanpoc
+Group=loanpoc
+WorkingDirectory=/opt/loan-poc/current
+EnvironmentFile=/opt/loan-poc/.env
+Environment=NODE_ENV=production
+Environment=MOCK_PORT=4100
+# deploy.sh replaces /usr/bin/node with the VM's node path if it differs.
+ExecStart=/usr/bin/node --import tsx apps/mock-systems/src/main.ts
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

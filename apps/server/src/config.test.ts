@@ -8,6 +8,12 @@ describe('loadConfig', () => {
     expect(() => loadConfig({})).toThrow(ConfigError);
   });
 
+  it('refuses TEST_HOOKS in production', () => {
+    expect(() => loadConfig({ LLM_PROVIDER: 'stub', TEST_HOOKS: '1', NODE_ENV: 'production' })).toThrow(/TEST_HOOKS/);
+    expect(loadConfig({ LLM_PROVIDER: 'stub', TEST_HOOKS: '1' }).config.testHooks).toBe(true);
+    expect(loadConfig({ LLM_PROVIDER: 'stub', NODE_ENV: 'production' }).config.testHooks).toBe(false);
+  });
+
   it('rejects an unknown provider and malformed numbers', () => {
     expect(() => loadConfig({ LLM_PROVIDER: 'openai' })).toThrow(/LLM_PROVIDER/);
     expect(() => loadConfig({ LLM_PROVIDER: 'stub', TURN_RATE_PER_MIN: 'abc' })).toThrow(/TURN_RATE_PER_MIN/);
@@ -45,6 +51,8 @@ describe('loadConfig', () => {
     expect(config).toMatchObject({ model: 'm', port: 5000, demoAccessCode: 'x', geminiApiKey: 'k' });
     expect(config.webOrigins).toEqual(['http://localhost:5173', 'https://a.example', 'https://b.example']);
     expect(config.engine.guardWaitMs).toBe(2500);
+    expect(config).toMatchObject({ host: '0.0.0.0', trustLoopbackProxy: false });
+    expect(loadConfig({ LLM_PROVIDER: 'stub', HOST: '127.0.0.1', TRUST_PROXY: '1' }).config).toMatchObject({ host: '127.0.0.1', trustLoopbackProxy: true });
   });
 });
 

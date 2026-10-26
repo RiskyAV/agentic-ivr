@@ -171,6 +171,21 @@ describe('HTTP', () => {
     expect(after.payments.extraLatencyMs).toBe(0);
   });
 
+  it('with DEMO_ACCESS_CODE set, chaos changes need a session token; chaos GET and metrics stay open', async () => {
+    const g = await startApp(testConfig({ demoAccessCode: 'letmein' }));
+    const body = JSON.stringify({ payments: { extraLatencyMs: 7 } });
+    const json = { 'content-type': 'application/json' };
+    expect((await fetch(`${g.base}/api/chaos`, { method: 'PUT', headers: json, body })).status).toBe(401);
+    expect((await fetch(`${g.base}/api/chaos/reset`, { method: 'POST' })).status).toBe(401);
+    expect((await fetch(`${g.base}/api/chaos/reset`, { method: 'POST', headers: { authorization: 'Bearer forged.token' } })).status).toBe(401);
+    expect((await fetch(`${g.base}/api/chaos`)).status).toBe(200);
+    expect((await fetch(`${g.base}/api/metrics`)).status).toBe(200);
+    const { body: s } = await login('C1001', { accessCode: 'letmein' }, g.base);
+    const authz = { authorization: `Bearer ${s.token}` };
+    expect((await fetch(`${g.base}/api/chaos`, { method: 'PUT', headers: { ...json, ...authz }, body })).status).toBe(200);
+    expect((await fetch(`${g.base}/api/chaos/reset`, { method: 'POST', headers: authz })).status).toBe(200);
+  });
+
   it('CORS allows the web dev origin and WEB_ORIGIN, not others', async () => {
     const s = await startApp(testConfig({}, { WEB_ORIGIN: 'https://demo.example.com' }));
     const h = async (o: string) => (await fetch(`${s.base}/api/health`, { headers: { origin: o } })).headers.get('access-control-allow-origin');

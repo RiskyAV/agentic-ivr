@@ -8,6 +8,10 @@ export const DEFAULT_GUARD_MODEL = 'gemini-3.5-flash-lite';
 
 export interface Config {
   port: number;
+  /** Listen address: 0.0.0.0 by default (containers); 127.0.0.1 behind a local reverse proxy. */
+  host: string;
+  /** TRUST_PROXY=1: take the client IP from X-Forwarded-For set by a reverse proxy on loopback (login rate limit per real IP). */
+  trustLoopbackProxy: boolean;
   mockBaseUrl: string;
   llmProvider: 'gemini' | 'stub';
   geminiApiKey?: string;
@@ -84,9 +88,15 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     sessionSecret = randomBytes(32).toString('hex');
     warnings.push('SESSION_SECRET is not set; generated a random one. Sessions will not survive a restart.');
   }
+  const testHooks = env.TEST_HOOKS === '1';
+  if (testHooks && env.NODE_ENV === 'production') {
+    throw new ConfigError('TEST_HOOKS=1 is not allowed with NODE_ENV=production (it exposes /api/test/* endpoints).');
+  }
   const model = str(env, 'GEMINI_MODEL', DEFAULT_MODEL);
   const config: Config = {
     port: num(env, 'PORT', 4000, 0),
+    host: str(env, 'HOST', '0.0.0.0'),
+    trustLoopbackProxy: env.TRUST_PROXY === '1',
     mockBaseUrl: str(env, 'MOCK_BASE_URL', 'http://127.0.0.1:4100'),
     llmProvider: provider,
     ...(apiKey && { geminiApiKey: apiKey }),
@@ -101,7 +111,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     llmQueueTimeoutMs: num(env, 'LLM_QUEUE_TIMEOUT_MS', 4000),
     maxVoiceSessions: num(env, 'MAX_VOICE_SESSIONS', 5, 0),
     stubChunkDelayMs: num(env, 'STUB_CHUNK_DELAY_MS', 0, 0),
-    testHooks: env.TEST_HOOKS === '1',
+    testHooks,
     voice: {
       ...(env.ELEVENLABS_API_KEY?.trim() && { elevenLabsApiKey: env.ELEVENLABS_API_KEY.trim() }),
       ...(env.ELEVENLABS_VOICE_ID?.trim() && { voiceId: env.ELEVENLABS_VOICE_ID.trim() }),

@@ -6,6 +6,10 @@ export const API_BASE = (import.meta.env.VITE_API_BASE ?? '').replace(/\/+$/, ''
 
 export const SYSTEMS: SystemName[] = ['crm', 'lms', 'payments', 'policy', 'ops'];
 
+/** The signed-in session's token, sent on calls that need it when the server is gated (chaos changes). */
+let authToken: string | undefined;
+export function setApiToken(token: string | undefined): void { authToken = token; }
+
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) { super(message); }
 }
@@ -45,8 +49,8 @@ export const api = {
   checkToken: (token: string) => call<unknown>('/api/me/snapshot', {}, token),
   chaos: async (): Promise<ChaosConfig> => normaliseChaos(await call<Record<string, Partial<SystemChaos>>>('/api/chaos')),
   setChaos: async (c: ChaosConfig): Promise<ChaosConfig> =>
-    normaliseChaos(await call<Record<string, Partial<SystemChaos>>>('/api/chaos', { method: 'PUT', body: JSON.stringify(c) })),
-  resetChaos: () => call<{ ok: boolean }>('/api/chaos/reset', { method: 'POST' }),
+    normaliseChaos(await call<Record<string, Partial<SystemChaos>>>('/api/chaos', { method: 'PUT', body: JSON.stringify(c) }, authToken)),
+  resetChaos: () => call<{ ok: boolean }>('/api/chaos/reset', { method: 'POST' }, authToken),
 };
 
 /** The mock returns effective profiles (with base latency fields); keep only what the controls edit. */

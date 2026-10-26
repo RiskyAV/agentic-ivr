@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import './index.css';
 import { AppShell } from './pages/App';
 import { Login } from './pages/Login';
+import { setApiToken } from './api';
 import { loadSession, saveSession, type StoredSession } from './session';
 import { socket } from './socket';
 import { useStore } from './store';
@@ -19,8 +20,9 @@ function Root() {
 
   useEffect(() => {
     if (!session) return;
+    setApiToken(session.token);
     socket.connect(session.token, logout);
-    return () => socket.disconnect();
+    return () => { socket.disconnect(); setApiToken(undefined); };
   }, [session, logout]);
 
   if (!session) {

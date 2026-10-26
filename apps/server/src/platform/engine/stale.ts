@@ -4,7 +4,11 @@ import { text, type BoundValue } from '../grounding/values.js';
 export function describeStale(asOfIso: string, nowMs: number): string {
   const at = Date.parse(asOfIso);
   const mins = Math.max(0, Math.floor((nowMs - at) / 60_000));
-  const age = mins < 1 ? 'less than a minute ago' : mins < 60 ? `${mins} ${mins === 1 ? 'minute' : 'minutes'} ago` : `${Math.round(mins / 60)} hour(s) ago`;
+  const hours = Math.floor(mins / 60);
+  const age =
+    mins < 1 ? 'less than a minute ago'
+    : mins < 60 ? `${mins} ${mins === 1 ? 'minute' : 'minutes'} ago`
+    : `${hours} ${hours === 1 ? 'hour' : 'hours'} ago`;
   return `${age} (at ${new Date(at).toISOString().slice(11, 16)} UTC)`;
 }
 

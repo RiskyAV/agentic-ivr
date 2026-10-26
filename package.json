@@ -18,11 +18,13 @@
     "load": "tsx scripts/load.ts",
     "replay": "tsx scripts/replay.ts"
   },
+  "dependencies": {
+    "tsx": "^4.19.0"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "concurrently": "^9.0.0",
     "playwright": "^1.64.1",
-    "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^3.0.0"
   }

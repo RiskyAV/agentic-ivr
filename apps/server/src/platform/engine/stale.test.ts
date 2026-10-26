@@ -8,6 +8,8 @@ describe('describeStale', () => {
     expect(describeStale('2026-10-25T09:55:00.000Z', NOW)).toBe('5 minutes ago (at 09:55 UTC)');
     expect(describeStale('2026-10-25T09:59:30.000Z', NOW)).toBe('less than a minute ago (at 09:59 UTC)');
     expect(describeStale('2026-10-25T09:59:00.000Z', NOW)).toBe('1 minute ago (at 09:59 UTC)');
+    expect(describeStale('2026-10-25T08:30:00.000Z', NOW)).toBe('1 hour ago (at 08:30 UTC)');
+    expect(describeStale('2026-10-25T07:00:00.000Z', NOW)).toBe('3 hours ago (at 07:00 UTC)');
   });
 });
 

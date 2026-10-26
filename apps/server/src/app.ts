@@ -103,7 +103,8 @@ export async function buildApp(config: Config, opts: AppOptions = {}): Promise<A
   const vendors = opts.voice === undefined ? vendorsFrom(config) : opts.voice ?? undefined;
   if (vendors) ctx.voice = vendors;
 
-  const app = Fastify({ logger: false });
+  // Behind nginx on the same host, trust only the loopback hop, so X-Forwarded-For from the internet cannot be spoofed past it.
+  const app = Fastify({ logger: false, ...(config.trustLoopbackProxy && { trustProxy: '127.0.0.1' }) });
   registerHttp(app, ctx);
   const ws = attachWs(app.server, ctx);
   ctx.voiceSessions = () => ws.voiceCount();
@@ -115,7 +116,7 @@ export async function buildApp(config: Config, opts: AppOptions = {}): Promise<A
 
   return {
     app, llm, sessions, ctx,
-    async listen(port = config.port, host = '0.0.0.0') {
+    async listen(port = config.port, host = config.host) {
       await app.listen({ port, host });
       return (app.server.address() as { port: number }).port;
     },
