@@ -116,19 +116,23 @@ install_nginx_site() {
   BACKUP=""; if [ -f "$AVAIL" ]; then BACKUP="$(mktemp)"; cp "$AVAIL" "$BACKUP"; fi
   put "$AVAIL" 644 root:root "$B64"
   if [ -n "$ENABLED" ]; then ln -sfn "$AVAIL" "$ENABLED"; fi
+  restore_site() {
+    if [ -n "$BACKUP" ]; then cp "$BACKUP" "$AVAIL"; else rm -f "$AVAIL"; [ -z "$ENABLED" ] || rm -f "$ENABLED"; fi
+    rm -f "$BACKUP"
+  }
   if ! nginx -t; then
     echo "nginx -t failed; restoring the previous $SITE" >&2
-    if [ -n "$BACKUP" ]; then cp "$BACKUP" "$AVAIL"; else rm -f "$AVAIL"; [ -z "$ENABLED" ] || rm -f "$ENABLED"; fi
+    restore_site
     exit 1
   fi
-  [ -z "$BACKUP" ] || rm -f "$BACKUP"
-  systemctl reload nginx
-
   if [ "$(site_sums)" != "$PROTECTED_BEFORE" ]; then
-    echo "a protected nginx site changed during the nginx install; investigate before continuing:" >&2
+    echo "a protected nginx site changed during the nginx install; restoring our previous $SITE, not reloading:" >&2
     diff <(printf '%s\n' "$PROTECTED_BEFORE") <(site_sums) >&2 || true
+    restore_site
     exit 1
   fi
+  rm -f "$BACKUP"
+  systemctl reload nginx
 }
 NGINXFN
 }
@@ -258,7 +262,7 @@ CERTHEAD
 command -v certbot >/dev/null || { echo "certbot is not installed on the VM" >&2; exit 1; }
 install_nginx_site
 echo "--> certbot (webroot)"
-certbot certonly --webroot -w /var/www/letsencrypt -d api.sparsan.com --non-interactive --agree-tos --keep-until-expiring --deploy-hook "systemctl reload nginx"
+certbot certonly --webroot -w /var/www/letsencrypt -d api.sparsan.com --non-interactive --agree-tos --cert-name api.sparsan.com --keep-until-expiring --deploy-hook "systemctl reload nginx" </dev/null
 install_nginx_site
 echo "Certificate in place; nginx now serves the TLS variant."
 CERTTAIL
