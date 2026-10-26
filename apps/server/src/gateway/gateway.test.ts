@@ -566,6 +566,90 @@ describe('voice over the gateway (fake vendors)', () => {
   });
 });
 
+describe('voice limits (fake clock)', () => {
+  const until = async (pred: () => boolean, ms = 3000) => {
+    const end = Date.now() + ms;
+    while (!pred()) {
+      if (Date.now() > end) throw new Error('timeout');
+      await new Promise((r) => setTimeout(r, 10));
+    }
+  };
+  const vendors = () => {
+    const stts: FakeStt[] = [];
+    return { stts, voice: { stt: async () => { const x = new FakeStt(); stts.push(x); return x; }, tts: async () => new FakeTts() } };
+  };
+
+  it('stops voice after VOICE_IDLE_MS without a committed transcript or assistant audio', async () => {
+    let clock = Date.now();
+    const { stts, voice } = vendors();
+    const base = testConfig({ maxVoiceSessions: 2 });
+    const app = await startApp({ ...base, voice: { ...base.voice, idleMs: 120_000, maxMs: 900_000 } }, { voice, now: () => clock });
+    const { body } = await login('C1001', {}, app.base);
+    const c = await new Client(body.token, app.wsBase).ready();
+    c.send({ type: 'voice_start' });
+    await until(() => stts.length === 1 && app.h.ctx.voiceSessions() === 1);
+    clock += 119_000;
+    app.h.sweepVoice();
+    expect(app.h.ctx.voiceSessions()).toBe(1);
+    const from = c.msgs.length;
+    stts[0]!.emit('committed', "what's my next EMI");
+    await c.waitFor('assistant_done', from);
+    clock += 119_000; // activity was just now: still on
+    app.h.sweepVoice();
+    expect(app.h.ctx.voiceSessions()).toBe(1);
+    clock += 2_000;
+    app.h.sweepVoice();
+    expect(await c.waitFor('voice_stopped', from)).toEqual({ type: 'voice_stopped', reason: 'idle' });
+    expect(app.h.ctx.voiceSessions()).toBe(0);
+    await until(() => stts[0]!.closed);
+    await c.close();
+  });
+
+  it('stops voice after VOICE_MAX_MS even when active', async () => {
+    let clock = Date.now();
+    const { stts, voice } = vendors();
+    const base = testConfig({ maxVoiceSessions: 2 });
+    const app = await startApp({ ...base, voice: { ...base.voice, idleMs: 120_000, maxMs: 300_000 } }, { voice, now: () => clock });
+    const { body } = await login('C1001', {}, app.base);
+    const c = await new Client(body.token, app.wsBase).ready();
+    c.send({ type: 'voice_start' });
+    await until(() => stts.length === 1 && app.h.ctx.voiceSessions() === 1);
+    for (let i = 0; i < 3; i++) {
+      clock += 100_000;
+      const from = c.msgs.length;
+      stts[0]!.emit('committed', "what's my next EMI");
+      await c.waitFor('assistant_done', from);
+      app.h.sweepVoice();
+    }
+    expect(app.h.ctx.voiceSessions()).toBe(1); // exactly 300 s: not over yet
+    clock += 1_000;
+    const from = c.msgs.length;
+    app.h.sweepVoice();
+    expect(await c.waitFor('voice_stopped', from)).toEqual({ type: 'voice_stopped', reason: 'max_duration' });
+    expect(app.h.ctx.voiceSessions()).toBe(0);
+    await c.close();
+  });
+
+  it('allows one voice session per customer: a new voice_start stops the older one', async () => {
+    const { stts, voice } = vendors();
+    const app = await startApp(testConfig({ maxVoiceSessions: 1 }), { voice });
+    const a = await new Client((await login('C1001', {}, app.base)).body.token, app.wsBase).ready();
+    const b = await new Client((await login('C1001', {}, app.base)).body.token, app.wsBase).ready();
+    a.send({ type: 'voice_start' });
+    await until(() => stts.length === 1 && app.h.ctx.voiceSessions() === 1);
+    const fa = a.msgs.length;
+    const fb = b.msgs.length;
+    b.send({ type: 'voice_start' }); // cap is 1, but the older session of the same customer gives way
+    await until(() => stts.length === 2);
+    expect(await a.waitFor('voice_stopped', fa)).toEqual({ type: 'voice_stopped', reason: 'replaced' });
+    expect(stts[0]!.closed).toBe(true);
+    expect(app.h.ctx.voiceSessions()).toBe(1);
+    expect(b.msgs.slice(fb).filter((m) => m.type === 'error')).toHaveLength(0);
+    await a.close();
+    await b.close();
+  });
+});
+
 function gwAudit(h: AppHandle) {
   return h.ctx.audit.list(100);
 }

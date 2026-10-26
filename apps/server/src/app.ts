@@ -57,6 +57,8 @@ export interface AppHandle {
   llm: LlmClient;
   sessions: SessionStore;
   ctx: GatewayCtx;
+  /** Applies the voice idle/duration limits now (they also run every few seconds); for tests. */
+  sweepVoice(): void;
   /** Listens and returns the bound port (pass 0 for an ephemeral one). */
   listen(port?: number, host?: string): Promise<number>;
   close(): Promise<void>;
@@ -116,6 +118,7 @@ export async function buildApp(config: Config, opts: AppOptions = {}): Promise<A
 
   return {
     app, llm, sessions, ctx,
+    sweepVoice: () => ws.sweepVoice(),
     async listen(port = config.port, host = config.host) {
       await app.listen({ port, host });
       return (app.server.address() as { port: number }).port;

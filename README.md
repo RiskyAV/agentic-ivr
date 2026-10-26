@@ -97,6 +97,7 @@ npm run eval
 |---|---|
 | Answers say a system is unavailable after a chaos demo | The circuit breaker stays open for about 10 s after failures, and cached data may be stale. Click **Reset all**, or `curl -X POST localhost:4000/api/chaos/reset` (this also restores the mock data). With `DEMO_ACCESS_CODE` set, add `-H "authorization: Bearer <token>"` |
 | "Voice is busy right now" (`voice_capacity`) | At most `MAX_VOICE_SESSIONS` (default 5) voice sessions at once, because each holds two vendor sockets. Stop voice in another tab, or raise the limit |
+| Voice switched itself off | Voice stops after `VOICE_IDLE_MS` (default 2 min) without speech or an answer, after `VOICE_MAX_MS` (default 15 min) in total, when the tab is hidden, or when the same customer starts voice in another window (one voice session per customer). Press the mic again |
 | Voice does not start, and the server logged "voice mode is disabled" at startup | Set both `ELEVENLABS_API_KEY` and `ELEVENLABS_VOICE_ID`, then restart |
 | Server exits with `GEMINI_API_KEY is required` | Add the key, or set `LLM_PROVIDER=stub` |
 | "Very high demand" replies under load | The LLM limiter (`LLM_MAX_CONCURRENCY`, queue `LLM_QUEUE_TIMEOUT_MS`) is shedding load by design |

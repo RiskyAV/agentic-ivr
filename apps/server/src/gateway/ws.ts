@@ -22,6 +22,7 @@ export const SWEEP_EVERY_MS = 60_000;
 export const REPLACED_CODE = 4001;
 const MAX_TEXT_CHARS = 4000;
 const PING_EVERY_MS = 25_000;
+const VOICE_SWEEP_MS = 5_000;
 /** Outbound audio is dropped (not queued) once this much is buffered for a slow client (D-024). */
 const MAX_BUFFERED_AUDIO_BYTES = 2 * 1024 * 1024;
 
@@ -33,6 +34,9 @@ interface Conn {
   replaced: boolean;
   /** Present while the client is in voice mode. */
   voice?: VoiceSession;
+  /** ctx.now() when voice started, and of the last committed transcript or assistant audio (idle/max limits). */
+  voiceStartedAt?: number;
+  voiceActiveAt?: number;
 }
 
 export interface WsGateway {
@@ -42,6 +46,8 @@ export interface WsGateway {
   touchLive(): void;
   /** Connections in voice mode. */
   voiceCount(): number;
+  /** Stops voice sessions past VOICE_IDLE_MS or VOICE_MAX_MS (runs every few seconds; public for tests). */
+  sweepVoice(): void;
   close(): Promise<void>;
 }
 
@@ -128,6 +134,8 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
   const err = (c: Conn, code: string, message: string) => send(c, { type: 'error', code, message });
 
   const sendVoice = (c: Conn, m: ServerMsg | Uint8Array) => {
+    // Activity for the idle limit: a committed transcript or assistant audio.
+    if (m instanceof Uint8Array || (m.type === 'transcript' && m.final && m.text.trim())) c.voiceActiveAt = ctx.now();
     if (!(m instanceof Uint8Array)) return send(c, m);
     if (c.replaced || c.ws.readyState !== WebSocket.OPEN || c.ws.bufferedAmount > MAX_BUFFERED_AUDIO_BYTES) return;
     c.ws.send(m, { binary: true });
@@ -141,10 +149,33 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
     v.stop();
   }
 
+  /** Server-initiated stop: the client returns to text mode and shows why. */
+  function endVoice(c: Conn, reason: 'idle' | 'max_duration' | 'replaced') {
+    if (!c.voice) return;
+    stopVoice(c);
+    send(c, { type: 'voice_stopped', reason });
+  }
+
+  function sweepVoice() {
+    const t = ctx.now();
+    const { idleMs, maxMs } = ctx.config.voice;
+    for (const c of active.values()) {
+      if (!c.voice) continue;
+      if (t - (c.voiceStartedAt ?? t) > maxMs) endVoice(c, 'max_duration');
+      else if (t - (c.voiceActiveAt ?? t) > idleMs) endVoice(c, 'idle');
+    }
+  }
+  const voiceSweep = setInterval(sweepVoice, VOICE_SWEEP_MS);
+  voiceSweep.unref();
+
   async function startVoice(c: Conn, mode: 'open' | 'ptt') {
     if (c.voice) return;
     const vendors = ctx.voice;
     if (!vendors) return err(c, 'voice_unavailable', 'Voice is not configured on this server.');
+    // One voice session per customer: an older one (another tab or device) gives way, freeing its slot first.
+    for (const other of active.values()) {
+      if (other !== c && other.voice && other.session.customerId === c.session.customerId) endVoice(other, 'replaced');
+    }
     if (voices.size >= ctx.config.maxVoiceSessions) {
       return err(c, 'voice_capacity', 'Voice is at capacity right now. Please use text, or try again shortly.');
     }
@@ -174,6 +205,7 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
     });
     // Reserve the slot before the vendor handshake so concurrent starts cannot exceed the cap.
     c.voice = v;
+    c.voiceStartedAt = c.voiceActiveAt = ctx.now();
     voices.add(v);
     try {
       await v.start();
@@ -398,12 +430,14 @@ export function attachWs(server: HttpServer, ctx: GatewayCtx): WsGateway {
   return {
     liveCount: () => active.size,
     voiceCount: () => voices.size,
+    sweepVoice,
     touchLive() {
       const t = ctx.now();
       for (const c of active.values()) c.session.lastSeenAt = t;
     },
     async close() {
       clearInterval(ping);
+      clearInterval(voiceSweep);
       for (const c of active.values()) stopVoice(c);
       for (const c of wss.clients) c.close(1001, 'server shutting down');
       await new Promise((r) => setTimeout(r, 50));

@@ -59,6 +59,8 @@ export class VoiceController {
     window.addEventListener('keydown', (e) => this.onKey(e, true));
     window.addEventListener('keyup', (e) => this.onKey(e, false));
     window.addEventListener('blur', () => this.setPtt(false));
+    // A hidden tab must not keep the microphone and two vendor sockets open.
+    document.addEventListener('visibilitychange', () => this.onVisibility(document.visibilityState === 'hidden'));
     if (import.meta.env.DEV) (window as unknown as { __voice?: unknown }).__voice = this.debug;
   }
 
@@ -100,6 +102,11 @@ export class VoiceController {
   }
 
   stop(): void { this.teardown(true); }
+
+  /** Page visibility changed (public for tests): a hidden tab stops voice. */
+  onVisibility(hidden: boolean): void {
+    if (hidden && (this.active || this.starting)) this.stop();
+  }
 
   /** Push-to-talk press/release (button or Space). Ignored unless a PTT session is running. */
   setPtt(down: boolean): void {
@@ -224,6 +231,9 @@ export class VoiceController {
       case 'trace':
         // The server holds the trace until the first audio; a turn that ends without any audio must not leave us "thinking".
         if (useStore.getState().voice.state === 'thinking' && !(this.player?.playing)) this.setState('listening');
+        break;
+      case 'voice_stopped':
+        this.teardown(false); // the server already stopped its side
         break;
       case 'error':
         if (m.code === 'voice_capacity' || m.code === 'voice_vendor_error' || m.code === 'voice_unavailable') this.teardown(false);

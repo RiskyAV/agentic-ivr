@@ -94,6 +94,11 @@ const VOICE_MESSAGES: Record<string, string> = {
   voice_vendor_error: 'Voice ran into a problem, so we switched back to text. You can try voice again in a moment.',
   voice_unavailable: 'Voice is not available right now, please use text.',
 };
+const VOICE_STOPPED: Record<string, string> = {
+  idle: 'Voice switched off because it was idle. Tap the mic to talk again.',
+  max_duration: 'Voice sessions are limited in this demo, so we switched back to text. Tap the mic to start again.',
+  replaced: 'Voice moved to your other window, so it was switched off here.',
+};
 const VOICE_ERRORS = new Set(['voice_unavailable', 'voice_vendor_error', 'voice_capacity', 'voice_not_started']);
 
 export function reduce(s: AppState, m: ServerMsg): AppState {
@@ -170,6 +175,9 @@ export function reduce(s: AppState, m: ServerMsg): AppState {
       const ended = s.activeTurn && !VOICE_ERRORS.has(m.code) ? endTurn(s, s.activeTurn.turnId) : s;
       return { ...ended, notice };
     }
+    // The server ended voice (idle, time limit, or another window took over): text mode, with a toast saying why.
+    case 'voice_stopped':
+      return { ...s, notice: { code: `voice_stopped_${m.reason}`, message: VOICE_STOPPED[m.reason] ?? 'Voice was switched off.', at: Date.now() } };
     // The final transcript becomes the user bubble via turn_start, so the live caption is cleared.
     case 'transcript':
       return { ...s, voice: { ...s.voice, caption: m.final ? '' : m.text } };

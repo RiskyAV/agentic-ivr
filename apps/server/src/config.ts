@@ -48,6 +48,10 @@ export interface VoiceSettings {
   /** dB above the adaptive noise floor a frame needs to count as voice. */
   bargeInVadMarginDb: number;
   fillerAfterMs: number;
+  /** A voice session with no committed transcript and no assistant audio for this long is stopped (cost, slot lockout). */
+  idleMs: number;
+  /** Hard cap on one voice session's length. */
+  maxMs: number;
 }
 
 export class ConfigError extends Error {}
@@ -122,6 +126,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       bargeInVadDb: num(env, 'BARGE_IN_VAD_DB', -40, -90),
       bargeInVadMarginDb: num(env, 'BARGE_IN_VAD_MARGIN_DB', 15, 0),
       fillerAfterMs: num(env, 'FILLER_AFTER_MS', 700, 0),
+      idleMs: num(env, 'VOICE_IDLE_MS', 120_000, 1000),
+      maxMs: num(env, 'VOICE_MAX_MS', 900_000, 1000),
     },
     eventLogDir: str(env, 'EVENT_LOG_DIR', fileURLToPath(new URL('../../../.data/events', import.meta.url))),
     engine: engineConfigFromEnv({ ...env, GEMINI_MODEL: model }),

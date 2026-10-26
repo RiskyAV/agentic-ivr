@@ -123,6 +123,32 @@ describe('VoiceController', () => {
     expect(t.state()).toBe('listening');
   });
 
+  it('voice_stopped from the server returns to text mode without sending voice_stop, and shows why', async () => {
+    const t = setup();
+    const p = t.c.start(false);
+    t.captures[0]!.resolve({} as Capture);
+    await p;
+    t.msg({ type: 'voice_stopped', reason: 'idle' });
+    useStore.getState().apply({ type: 'voice_stopped', reason: 'idle' });
+    expect(t.state()).toBe('off');
+    expect(t.captures[0]!.stopped).toBe(true);
+    expect(t.types()).toEqual(['voice_start']);
+    expect(useStore.getState().notice?.message).toMatch(/idle/i);
+  });
+
+  it('a hidden tab stops capture and voice', async () => {
+    const t = setup();
+    const p = t.c.start(false);
+    t.captures[0]!.resolve({} as Capture);
+    await p;
+    t.c.onVisibility(false);
+    expect(t.state()).toBe('listening');
+    t.c.onVisibility(true);
+    expect(t.state()).toBe('off');
+    expect(t.captures[0]!.stopped).toBe(true);
+    expect(t.types()).toEqual(['voice_start', 'voice_stop']);
+  });
+
   it('a barge-in after the utterance was fully played and reported sends no second report', async () => {
     const t = setup();
     const p = t.c.start(false);

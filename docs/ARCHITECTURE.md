@@ -282,5 +282,5 @@ No engine, grounding, action, guard or voice changes. The cost scales with the d
 - Echo handling (browser echo cancellation plus the self-echo guard) has not been tested on open laptop speakers in a video call; the voice runs used synthetic fixtures and headphones. Push-to-talk is the fallback (see the README's video-call section).
 - Hedging showed no measurable benefit on these failure profiles (§8).
 - Chaos is global to the process: one reviewer's chaos affects everyone.
-- Voice is capped at `MAX_VOICE_SESSIONS=5`, because each voice session holds two vendor sockets.
+- Voice is capped at `MAX_VOICE_SESSIONS=5`, because each voice session holds two vendor sockets. To stop one reviewer locking the others out (and to bound vendor cost), a voice session ends after 2 minutes without a committed transcript or assistant audio (`VOICE_IDLE_MS`), after 15 minutes in total (`VOICE_MAX_MS`), when the tab is hidden, or when the same customer starts voice elsewhere (one per customer).
 - The mock data is synthetic and the clock is fixed (`DEMO_TODAY=2026-10-25`). There is no real authentication, and the OTP is fixed.
