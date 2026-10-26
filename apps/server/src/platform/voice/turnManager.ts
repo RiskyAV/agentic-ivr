@@ -354,7 +354,7 @@ export class VoiceSession {
       this.voiceLastAt = now;
     }
     // Onset tracking above runs on every frame (consent timing needs it); only the barge-in trigger can be disabled.
-    const needMs = this.d.cfg.bargeInVadMs ?? 500;
+    const needMs = this.d.cfg.bargeInVadMs ?? 0;
     if (needMs <= 0) return;
     const u = this.cur;
     if (!u || !u.speaking(now, this.margin)) {

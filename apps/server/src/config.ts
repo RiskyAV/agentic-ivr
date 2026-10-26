@@ -125,7 +125,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       ttsModel: str(env, 'ELEVENLABS_TTS_MODEL', 'eleven_flash_v2_5'),
       sttSilenceSecs: num(env, 'STT_SILENCE_SECS', 0.45, 0.1),
       bargeInMinWords: num(env, 'BARGE_IN_MIN_WORDS', 2),
-      bargeInVadMs: num(env, 'BARGE_IN_VAD_MS', 500, 0),
+      bargeInVadMs: num(env, 'BARGE_IN_VAD_MS', 0, 0),
       bargeInVadDb: num(env, 'BARGE_IN_VAD_DB', -40, -90),
       bargeInVadMarginDb: num(env, 'BARGE_IN_VAD_MARGIN_DB', 15, 0),
       fillerAfterMs: num(env, 'FILLER_AFTER_MS', 700, 0),

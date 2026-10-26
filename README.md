@@ -87,7 +87,7 @@ npm run eval
 
 ## Demoing over a video call
 
-- **Use headphones.** Open-mic barge-in listens for speech energy. Laptop speakers feeding back into the mic can make the assistant interrupt itself. Browser echo cancellation and a self-echo guard help, but they have not been tested on open speakers.
+- **Speakers are fine; headphones are better.** Barge-in is transcript-based by default (2 words or a keyword such as "stop"/"wait"), and a self-echo guard ignores transcripts that match what the assistant is saying, so its own voice from laptop speakers does not cut it off (verified on a laptop with open speakers). Interrupting takes about 1.5–2 s. The faster energy trigger (`BARGE_IN_VAD_MS=500`) is off by default because speaker echo set it off; enable it only with headphones.
 - **Share the browser tab, not the screen,** and tick **"Share tab audio"** in Chrome's share dialog, so the call hears the assistant.
 - **Push-to-talk is the fallback.** Use the settings icon next to the mic, then hold the mic button or **Space** while speaking. Use it if the room is noisy or a reviewer's voice keeps triggering barge-in.
 - **Warm up once before the call.** Log in, ask one text question and one voice question. This warms the model, the STT and TTS sockets, and the caches, so the first live turn is not a cold start.
