@@ -10,6 +10,8 @@ import { loadConfig, type Config } from '../config.js';
 import { ZERO_CHAOS } from '../platform/tools/testkit.js';
 import { FakeStt, FakeTts } from '../platform/voice/fakes.js';
 import { signToken, verifyToken } from './auth.js';
+import { PROPOSAL_TTL_MS } from '../platform/actions/actionService.js';
+import { RESUME_WINDOW_MS, SESSION_IDLE_MS, SWEEP_EVERY_MS } from './ws.js';
 
 type Msg = ServerMsg;
 
@@ -99,6 +101,16 @@ class Client {
     return this;
   }
 }
+
+describe('timing invariants', () => {
+  it('a pending proposal always expires before its session can be swept', () => {
+    // The idle sweep deletes a session SESSION_IDLE_MS after it was last seen (checked every SWEEP_EVERY_MS); a proposal
+    // must be settled (expired) by then, and a reconnect inside the resume window must still find the session.
+    expect(PROPOSAL_TTL_MS).toBeLessThan(SESSION_IDLE_MS);
+    expect(RESUME_WINDOW_MS).toBeLessThan(SESSION_IDLE_MS);
+    expect(SWEEP_EVERY_MS).toBeLessThan(SESSION_IDLE_MS);
+  });
+});
 
 describe('auth tokens', () => {
   it('round-trips and rejects tampering and expiry', () => {

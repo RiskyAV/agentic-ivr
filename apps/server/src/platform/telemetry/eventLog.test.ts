@@ -1,10 +1,39 @@
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { EventLog, type LoggedEvent } from './eventLog.js';
 
 describe('EventLog', () => {
+  it('never throws: a failing write is warned about once and counted', () => {
+    const base = mkdtempSync(join(tmpdir(), 'ev-'));
+    const blocker = join(base, 'file');
+    writeFileSync(blocker, 'x'); // a file where the directory should be: mkdir/append fail
+    const warn = vi.fn();
+    const recorded: string[] = [];
+    const log = new EventLog(join(blocker, 'events'), { warn, metrics: { record: (n) => { recorded.push(n); } } });
+    expect(() => log.append('s1', { type: 'timing', at: 1, metrics: {} })).not.toThrow();
+    expect(() => log.append('s1', { type: 'timing', at: 2, metrics: {} })).not.toThrow();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(recorded).toEqual(['event_log_errors', 'event_log_errors']);
+  });
+
+  it('keeps the directory under maxBytes by deleting the oldest session files', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ev-'));
+    const old = join(dir, 'old.jsonl');
+    writeFileSync(old, 'x'.repeat(1500) + '\n');
+    utimesSync(old, new Date(1000), new Date(1000));
+    const log = new EventLog(dir, { maxBytes: 2000 });
+    const big = 'y'.repeat(300);
+    for (let i = 0; i < 4; i++) log.append(`s${i}`, { type: 'user_input', at: i, text: big });
+    const files = readdirSync(dir);
+    expect(files).not.toContain('old.jsonl');
+    expect(files).toContain('s3.jsonl');
+    const total = files.reduce((n, f) => n + statSync(join(dir, f)).size, 0);
+    expect(total).toBeLessThanOrEqual(2000);
+    expect(log.read('s3')).toHaveLength(1);
+  });
+
   it('round-trips events in order, creating the dir', () => {
     const dir = join(mkdtempSync(join(tmpdir(), 'ev-')), 'nested', 'sessions');
     const log = new EventLog(dir);

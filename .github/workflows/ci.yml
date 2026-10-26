@@ -1,7 +1,9 @@
 name: CI
 
 on:
+  # main runs CI through deploy.yml (workflow_call), so a push to main is not tested twice.
   push:
+    branches-ignore: [main]
   pull_request:
   workflow_call:
 
@@ -19,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      # Deterministic: the stub LLM and fake voice vendors. Paid-API smoke tests skip without keys.
+      # Deterministic: the stub LLM and fake voice vendors. Paid-API smoke tests run only with RUN_SMOKE=1.
       LLM_PROVIDER: stub
     steps:
       - uses: actions/checkout@v4

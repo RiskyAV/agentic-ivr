@@ -3,7 +3,6 @@ import { parseAmount } from '@app/domain';
 import type { OpsRequestType } from '../../platform/connectors/types.js';
 import type { ToolContext } from '../../platform/tools/types.js';
 
-
 /** Normalises a loosely phrased amount (number or string) to integer paise; rejects what it cannot parse. */
 export const paiseField = z
   .preprocess((v) => (typeof v === 'number' ? String(v) : v), z.string().min(1))
@@ -30,5 +29,3 @@ export async function createRequest(ctx: ToolContext, type: OpsRequestType, para
   }
   return { reference: r.data.id, message: `${label} Your reference is ${r.data.id}.` };
 }
-
-// ---------------------------------------------------------------- prepayment

@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { checkModels, GeminiClient } from './gemini.js';
 import type { LlmChunk } from './types.js';
 
+// Paid API calls: opt in with RUN_SMOKE=1 (a key in .env alone never makes `npm test` spend money).
+const RUN = process.env.RUN_SMOKE === '1';
 try {
-  if (!process.env.GEMINI_API_KEY) process.loadEnvFile(new URL('../../../../../.env', import.meta.url).pathname);
+  if (RUN && !process.env.GEMINI_API_KEY) process.loadEnvFile(new URL('../../../../../.env', import.meta.url).pathname);
 } catch { /* no .env: smoke test is skipped */ }
 
 async function collect(it: AsyncIterable<LlmChunk>) {
@@ -12,7 +14,7 @@ async function collect(it: AsyncIterable<LlmChunk>) {
   return out;
 }
 
-describe.skipIf(!process.env.GEMINI_API_KEY)('Gemini smoke (real API)', () => {
+describe.skipIf(!RUN || !process.env.GEMINI_API_KEY)('Gemini smoke (real API, RUN_SMOKE=1)', () => {
   const model = process.env.GEMINI_MODEL ?? 'gemini-3.8-flash';
   const client = new GeminiClient(process.env.GEMINI_API_KEY!, model);
 

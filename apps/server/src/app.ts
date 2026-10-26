@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { DEMO_CUSTOMERS } from '@app/shared';
-import { ActionService } from './platform/actions/actionService.js';
+import { ActionService, PROPOSAL_TTL_MS } from './platform/actions/actionService.js';
 import { AuditLog } from './platform/actions/audit.js';
 import { buildConnectors } from './platform/connectors/clients.js';
 import { fetchTransport, type Transport } from './platform/connectors/transport.js';
@@ -66,6 +66,8 @@ export interface AppHandle {
 
 /** Wires config into connectors, tools, actions, engine, guard, sessions and the HTTP/WebSocket gateway. */
 export async function buildApp(config: Config, opts: AppOptions = {}): Promise<AppHandle> {
+  // A swept session takes its pending proposals with it; they must have expired first.
+  if (PROPOSAL_TTL_MS >= SESSION_IDLE_MS) throw new Error(`PROPOSAL_TTL_MS (${PROPOSAL_TTL_MS}) must be below SESSION_IDLE_MS (${SESSION_IDLE_MS})`);
   const now = opts.now ?? (() => Date.now());
   const llm: LlmClient =
     opts.llm ??
@@ -85,8 +87,9 @@ export async function buildApp(config: Config, opts: AppOptions = {}): Promise<A
   for (const t of collectionsTools) tools.register(t);
   for (const a of [...loanServicingActions, ...collectionsActions]) tools.register(actions.proposeTool(a.type));
   const workflows = new WorkflowRegistry().register(loanServicing).register(collections);
-  const eventLog = new EventLog(config.eventLogDir);
   const metrics = new Metrics();
+  // Never throws (a failing disk must not break a turn or a confirm); capped at 200 MB, oldest sessions dropped first.
+  const eventLog = new EventLog(config.eventLogDir, { metrics });
   const limiter = new Limiter(config.llmMaxConcurrency, config.llmQueueTimeoutMs);
   const sessions = new InMemorySessionStore(now);
   const engine = new Engine({

@@ -272,7 +272,7 @@ Store the token with `gh secret set` (section 4). The account ID is shown on the
 gcloud compute ssh $VM --project $PROJECT --zone $ZONE --command 'sudo certbot --nginx -d api.sparsan.com --redirect'
 ```
 
-certbot edits `loan-poc-api.conf` to add the 443 server block. From then on, a bootstrap re-run sees "managed by Certbot" and leaves that file alone. To change the proxy settings later, edit the file on the VM, then run `nginx -t && systemctl reload nginx`.
+certbot edits `loan-poc-api.conf` to add the 443 server block. From then on, a bootstrap re-run sees "managed by Certbot" and leaves that file alone. To change the proxy settings later, edit the file on the VM, then run `nginx -t && systemctl reload nginx`. This includes the access-log format that keeps the WebSocket token (in `/ws?token=`) out of the logs: if the file on the VM predates it, copy the `log_format loan_poc_noquery` and `access_log` lines from `deploy/nginx-api.conf` into it.
 
 ## 6. First deploy and check
 

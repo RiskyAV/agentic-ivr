@@ -17,6 +17,7 @@ import type { GatewayCtx } from './context.js';
 
 export const MAX_MESSAGE_BYTES = 64 * 1024;
 export const RESUME_WINDOW_MS = 5 * 60_000;
+/** Must stay above PROPOSAL_TTL_MS: a session is swept only after any proposal it holds has expired (checked at startup and in gateway.test). */
 export const SESSION_IDLE_MS = 30 * 60_000;
 export const SWEEP_EVERY_MS = 60_000;
 export const REPLACED_CODE = 4001;
